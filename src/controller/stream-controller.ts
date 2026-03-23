@@ -776,7 +776,12 @@ export default class StreamController
     // time Offset is accurate if level PTS is known, or if playlist is not sliding (not live)
     const accurateTimeOffset = details.PTSKnown || !details.live;
     const initSegmentData = frag.initSegment?.data;
-    const audioCodec = this._getAudioCodec(currentLevel);
+    const videoOnly =
+      typeof globalThis !== 'undefined' &&
+      (globalThis as any).__HLS_PLAYER_TEST_VIDEO_ONLY;
+    const audioCodec = videoOnly
+      ? undefined
+      : this._getAudioCodec(currentLevel);
 
     // transmux the MPEG-TS data to ISO-BMFF segments
     // this.log(`Transmuxing ${frag.sn} of [${details.startSN} ,${details.endSN}],level ${frag.level}, cc ${frag.cc}`);
@@ -1179,7 +1184,11 @@ export default class StreamController
     const { video, text, id3, initSegment } = remuxResult;
     const { details } = level;
     // The audio-stream-controller handles audio buffering if Hls.js is playing an alternate audio track
-    const audio = this.altAudio ? undefined : remuxResult.audio;
+    const videoOnly =
+      typeof globalThis !== 'undefined' &&
+      (globalThis as any).__HLS_PLAYER_TEST_VIDEO_ONLY;
+    const audio =
+      this.altAudio || videoOnly ? undefined : (remuxResult as any).audio;
 
     // Check if the current fragment has been aborted. We check this by first seeing if we're still playing the current level.
     // If we are, subsequently check if the currently loading fragment (fragCurrent) has changed.
@@ -1375,6 +1384,17 @@ export default class StreamController
   ) {
     if (this.state !== State.PARSING) {
       return;
+    }
+
+    const videoOnly =
+      typeof globalThis !== 'undefined' &&
+      (globalThis as any).__HLS_PLAYER_TEST_VIDEO_ONLY;
+    if (videoOnly) {
+      // Force a "video-only" debug mode:
+      // - remove init tracks that would make buffer-controller try to create audio SourceBuffers
+      // - prevents codec/SourceBuffer errors in environments that don't support AAC fMP4.
+      delete tracks.audio;
+      delete tracks.audiovideo;
     }
 
     this.audioOnly = !!tracks.audio && !tracks.video;
