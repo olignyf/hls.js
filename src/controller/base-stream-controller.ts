@@ -366,7 +366,8 @@ export default class BaseStreamController
   protected onManifestLoading() {
     const fc = this.fragCurrent;
     const preserveInFlightTest =
-      this.config.preserveInFlightFragOnManifestLoading;
+      typeof globalThis !== 'undefined' &&
+      (globalThis as any).__HLS_PLAYER_PRESERVE_MANIFEST_LOADING;
     const preserveInFlight =
       preserveInFlightTest &&
       !!fc &&
@@ -582,7 +583,6 @@ export default class BaseStreamController
             state === State.FRAG_LOADING ||
             (!this.fragCurrent && state === State.PARSING)
           ) {
-            console.log('removeFragment', frag);
             this.fragmentTracker.removeFragment(frag);
             this.state = State.IDLE;
           }
@@ -808,7 +808,6 @@ export default class BaseStreamController
   }
 
   protected fragContextChanged(frag: Fragment | null) {
-    console.log('fragContextChanged', frag);
     const { fragCurrent } = this;
     return !frag || !fragmentsAreEqual(frag, fragCurrent);
   }
