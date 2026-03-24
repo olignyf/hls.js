@@ -364,7 +364,22 @@ export default class BaseStreamController
   }
 
   protected onManifestLoading() {
+    const fc = this.fragCurrent;
+    const preserveInFlightTest =
+      this.config.preserveInFlightFragOnManifestLoading;
+    const preserveInFlight =
+      preserveInFlightTest &&
+      !!fc &&
+      (this.state === State.FRAG_LOADING ||
+        this.state === State.KEY_LOADING ||
+        this.state === State.PARSING);
+
     this.initPTS = [];
+    if (preserveInFlight) {
+      this.fragPlaying = null;
+      return; // dont zero this.fragCurrent
+    }
+
     this.fragPlaying =
       this.levels =
       this.levelLastLoaded =
@@ -567,6 +582,7 @@ export default class BaseStreamController
             state === State.FRAG_LOADING ||
             (!this.fragCurrent && state === State.PARSING)
           ) {
+            console.log('removeFragment', frag);
             this.fragmentTracker.removeFragment(frag);
             this.state = State.IDLE;
           }
@@ -792,6 +808,7 @@ export default class BaseStreamController
   }
 
   protected fragContextChanged(frag: Fragment | null) {
+    console.log('fragContextChanged', frag);
     const { fragCurrent } = this;
     return !frag || !fragmentsAreEqual(frag, fragCurrent);
   }
