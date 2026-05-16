@@ -318,10 +318,39 @@ export default class StreamController
     ) {
       this.backtrackFragment = undefined;
     }
+    // VoD: `getNextFragment(bufferInfo.end)` can sit on the trailing edge where `PTS == frag.end`
+    // clears `fragmentWithinToleranceTest` (strict `>`) — picker returns an OK fragment, inner
+    // `getFragmentAtPosition` clears to null, idle never pulls sn+1 → real stall (~0 buffer ahead).
+    // Sub-frame fudge + clamp advances the lookup into the following segment timeline.
+    const vodPrefetchBumpSec =
+      levelDetails.live || this.backtrackFragment
+        ? 0
+        : Math.min(4e-2, Math.max(levelDetails.edge - bufferInfo.end, 0));
+    const bufferProbeVoD = levelDetails.live
+      ? bufferInfo.end
+      : Math.min(
+          levelDetails.edge,
+          Math.max(bufferInfo.end, this.nextLoadPosition),
+        );
     const targetBufferTime = this.backtrackFragment
       ? this.backtrackFragment.start
-      : bufferInfo.end;
+      : vodPrefetchBumpSec > 0
+        ? Math.min(levelDetails.edge, bufferProbeVoD + vodPrefetchBumpSec)
+        : bufferProbeVoD;
     let frag = this.getNextFragment(targetBufferTime, levelDetails);
+    if (!frag && !levelDetails.live && this.fragPrevious !== null) {
+      const pv = this.fragPrevious;
+      if (pv.sn < levelDetails.endSN) {
+        const candidateNext =
+          levelDetails.fragments[pv.sn + 1 - levelDetails.startSN];
+        if (candidateNext && isMediaFragment(candidateNext)) {
+          const nxSt = this.fragmentTracker.getState(candidateNext);
+          if (nxSt !== FragmentState.OK && nxSt !== FragmentState.APPENDING) {
+            frag = candidateNext;
+          }
+        }
+      }
+    }
     // Avoid backtracking by loading an earlier segment in streams with segments that do not start with a key frame (flagged by `couldBacktrack`)
     if (
       this.couldBacktrack &&

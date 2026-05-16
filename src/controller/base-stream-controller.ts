@@ -75,6 +75,13 @@ import type { TimestampOffset } from '../utils/timescale-conversion';
 type ResolveFragLoaded = (FragLoadedEndData) => void;
 type RejectFragLoaded = (LoadError) => void;
 
+/** One-shot markers: grep console for `[hls-player-patch]` to confirm rollup built this fork into dist/. */
+let __loggedHlsPlayerPatch_manifestPreserve = false;
+let __loggedHlsPlayerPatch_nextLPClean = false;
+/** Mux timeline shorter than EXTINF vs buffer (first branch); vs stale NLP (second). */
+let __loggedHlsPlayerPatch_isLoopLoadingMux = false;
+let __loggedHlsPlayerPatch_isLoopLoadingStale = false;
+
 export const State = {
   STOPPED: 'STOPPED',
   IDLE: 'IDLE',
@@ -364,6 +371,30 @@ export default class BaseStreamController
   }
 
   protected onManifestLoading() {
+    const fc = this.fragCurrent;
+    const preserveInFlightTest =
+      typeof globalThis !== 'undefined' &&
+      (globalThis as any).__HLS_PLAYER_PRESERVE_MANIFEST_LOADING;
+    const preserveInFlight =
+      preserveInFlightTest &&
+      !!fc &&
+      (this.state === State.FRAG_LOADING ||
+        this.state === State.KEY_LOADING ||
+        this.state === State.PARSING);
+
+    if (preserveInFlight) {
+      if (!__loggedHlsPlayerPatch_manifestPreserve) {
+        __loggedHlsPlayerPatch_manifestPreserve = true;
+        console.warn(
+          '[hls-player-patch] MANIFEST_LOADING mid-fragment → preserve state; initPTS retained (fork). If absent, rollup did not rebuild dist/hls.js.',
+        );
+      }
+      // Keep `initPTS` — clearing it here breaks multi-segment TS (byte-range chunks): the remuxer
+      // needs the timeline from the first successful fragment when `MANIFEST_LOADING` fires
+      // mid-pipeline (e.g. after BUFFER_RESET / level refresh). Only drop the playing ref.
+      this.fragPlaying = null;
+      return;
+    }
     this.initPTS = [];
     this.fragPlaying =
       this.levels =
@@ -547,6 +578,14 @@ export default class BaseStreamController
             data.part ? ' part: ' + data.part.index : ''
           } of ${this.fragInfo(frag, false, data.part)}) was dropped during download.`,
         );
+        const cur = this.fragCurrent;
+        this.warn(
+          `[hls-debug] fragContextMismatch at progress callback: state=${
+            this.state
+          } loading=[sn:${frag.sn} lvl:${frag.level} cc:${frag.cc}] fragCurrent=${
+            cur ? `[sn:${cur.sn} lvl:${cur.level} cc:${cur.cc}]` : 'null'
+          }`,
+        );
         this.fragmentTracker.removeFragment(frag);
         return;
       }
@@ -563,6 +602,12 @@ export default class BaseStreamController
         const state = this.state;
         const frag = data.frag;
         if (this.fragContextChanged(frag)) {
+          const cur = this.fragCurrent;
+          this.warn(
+            `[hls-debug] fragContextMismatch at load complete (before handle): promiseState=${state} controllerState=${this.state} loaded=[sn:${frag.sn} lvl:${frag.level} cc:${frag.cc}] fragCurrent=${
+              cur ? `[sn:${cur.sn} lvl:${cur.level} cc:${cur.cc}]` : 'null'
+            }`,
+          );
           if (
             state === State.FRAG_LOADING ||
             (!this.fragCurrent && state === State.PARSING)
@@ -824,6 +869,38 @@ export default class BaseStreamController
         level.fragmentError = 0;
       }
     }
+
+    /* After PTS/duration correction, muxed length can be shorter than `_doFragLoad` used when
+       setting nextLoadPosition. Stale inflate (e.g. 30.9 vs buffer/playlist tail 28.75) triggers
+       false-positive isLoopLoading + buffer flush → early stall (~2–3 s). Clamp before next tick().
+     */
+    if (
+      frag.type === this.playlistType &&
+      frag.type === PlaylistLevelType.MAIN &&
+      isMediaFragment(frag)
+    ) {
+      const tail = frag.start + frag.duration;
+      if (
+        Number.isFinite(tail) &&
+        Number.isFinite(this.nextLoadPosition) &&
+        this.nextLoadPosition > tail + 0.004
+      ) {
+        if (!__loggedHlsPlayerPatch_nextLPClean) {
+          __loggedHlsPlayerPatch_nextLPClean = true;
+          console.warn(
+            '[hls-player-patch] Clamped inflated nextLoadPosition',
+            Number(this.nextLoadPosition).toFixed(3),
+            '→',
+            Number(tail).toFixed(3),
+            'sn:',
+            frag.sn,
+            '(rollup dist must include this fork).',
+          );
+        }
+        this.nextLoadPosition = tail;
+      }
+    }
+
     this.state = State.IDLE;
   }
 
@@ -1432,11 +1509,58 @@ export default class BaseStreamController
 
   protected isLoopLoading(frag: Fragment, targetBufferTime: number): boolean {
     const trackerState = this.fragmentTracker.getState(frag);
-    return (
-      (trackerState === FragmentState.OK ||
-        (trackerState === FragmentState.PARTIAL && !!frag.gap)) &&
-      this.nextLoadPosition > targetBufferTime
-    );
+    const okTracked =
+      trackerState === FragmentState.OK ||
+      (trackerState === FragmentState.PARTIAL && !!frag.gap);
+    /* Ignore float noise: nextLP is often exactly playlist tail (e.g. 28.75) while MSE
+       bufferInfo.end is 28.749999 — without epsilon this looked like "loop loading", flushed,
+       and blocked sn+1 (stall + spurious bufferStalledError while 20s+ remains). */
+    const fpJitter = 1e-2;
+    if (!okTracked || !(this.nextLoadPosition > targetBufferTime + fpJitter)) {
+      return false;
+    }
+
+    const playlistFragEnd = frag.start + frag.duration;
+    const { maxFragLookUpTolerance } = this.config;
+    const tol = Math.max(maxFragLookUpTolerance * 2, 0.25);
+
+    // Mux/media shorter than declared EXTINF → buffer hasn't reached playlist tail; not loop-loading.
+    if (targetBufferTime < playlistFragEnd - tol) {
+      if (!__loggedHlsPlayerPatch_isLoopLoadingMux && isMediaFragment(frag)) {
+        __loggedHlsPlayerPatch_isLoopLoadingMux = true;
+        console.warn(
+          '[hls-player-patch] isLoopLoading: skip — buffer end',
+          Number(targetBufferTime).toFixed(3),
+          '< playlist frag end',
+          Number(playlistFragEnd).toFixed(3),
+          'sn:',
+          frag.sn,
+        );
+      }
+      return false;
+    }
+
+    /* nextLP was set from pre-adjusted playlist duration while frag.start+duration is already
+       aligned to mux (~28.s). Without clamping/consulting playlist tail, we'd flush here. */
+    if (this.nextLoadPosition > playlistFragEnd + tol) {
+      if (!__loggedHlsPlayerPatch_isLoopLoadingStale && isMediaFragment(frag)) {
+        __loggedHlsPlayerPatch_isLoopLoadingStale = true;
+        console.warn(
+          '[hls-player-patch] isLoopLoading: skip — stale nextLoadPosition',
+          Number(this.nextLoadPosition).toFixed(3),
+          '> playlist tail',
+          Number(playlistFragEnd).toFixed(3),
+          'buf:',
+          Number(targetBufferTime).toFixed(3),
+          'sn:',
+          frag.sn,
+        );
+      }
+      return false;
+    }
+
+    const wouldLoopLoading = targetBufferTime >= playlistFragEnd - tol;
+    return wouldLoopLoading;
   }
 
   protected getNextFragmentLoopLoading(
