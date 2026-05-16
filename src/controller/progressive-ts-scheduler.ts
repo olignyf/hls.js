@@ -9,7 +9,19 @@ import {
   BufferHelper,
   type BufferInfo,
 } from '../utils/buffer-helper';
+import type { HlsConfig } from '../config';
 import type { LevelDetails } from '../loader/level-details';
+
+/** Max seconds of demuxed media to keep ahead of playhead in progressive TS mode. */
+export function getProgressiveMaxAheadSec(
+  config: Pick<HlsConfig, 'progressiveTsMaxAheadSec' | 'maxBufferLength'>,
+): number {
+  const ahead = config.progressiveTsMaxAheadSec;
+  if (Number.isFinite(ahead) && ahead > 0) {
+    return ahead;
+  }
+  return config.maxBufferLength;
+}
 
 /**
  * Sequential byte-range / raw-TS scheduling: advance by segment SN and demuxed
@@ -77,6 +89,50 @@ export function findFragmentIndexByByte(
   return lo;
 }
 
+/**
+ * End of the contiguous buffered prefix from the first range (stops at the first MSE hole).
+ * Serial progressive append must stitch here — not at a mis-timed later TimeRange.
+ */
+export function getSerialMseAppendTail(
+  media: Bufferable | null,
+  maxGapSec: number = 0.5,
+): number | null {
+  if (!media) {
+    return null;
+  }
+  const ranges = BufferHelper.bufferedRanges(media);
+  if (!ranges.length) {
+    return null;
+  }
+  let tail = ranges[0].end;
+  for (let i = 1; i < ranges.length; i++) {
+    if (ranges[i].start - tail > maxGapSec) {
+      break;
+    }
+    tail = Math.max(tail, ranges[i].end);
+  }
+  return tail;
+}
+
+/**
+ * MSE timestampOffset for progressive TS: remuxed fMP4 sample times are already
+ * initPTS-normalized (~0 at each fragment). Place the next fragment at the serial
+ * buffer tail, not tail − initPTS (which double-subtracts and lands at ~128s).
+ */
+export function progressiveContinuousAppendOffset(
+  media: Bufferable | null,
+  initPTS: { baseTime: number; timescale: number } | undefined,
+): number | undefined {
+  const tail = getSerialMseAppendTail(media);
+  if (tail !== null && Number.isFinite(tail)) {
+    return tail;
+  }
+  if (!initPTS?.timescale) {
+    return undefined;
+  }
+  return -initPTS.baseTime / initPTS.timescale;
+}
+
 export function getLastBufferedEnd(media: Bufferable | null): number | null {
   if (!media) {
     return null;
@@ -86,6 +142,64 @@ export function getLastBufferedEnd(media: Bufferable | null): number | null {
     return null;
   }
   return ranges[ranges.length - 1].end;
+}
+
+/** Playhead in a gap with a later buffered range already in MSE (PTS discontinuity). */
+export function getPlayheadBufferedHole(
+  media: Bufferable | null,
+  currentTime: number,
+): { nextStart: number; gap: number; prevEnd: number | null } | null {
+  if (!media || !Number.isFinite(currentTime)) {
+    return null;
+  }
+  if (BufferHelper.isBuffered(media, currentTime)) {
+    return null;
+  }
+  const info = BufferHelper.bufferInfo(media, currentTime, 0);
+  const nextStart = info.nextStart;
+  if (nextStart === undefined || nextStart <= currentTime + 0.02) {
+    return null;
+  }
+  let prevEnd: number | null = null;
+  const b = media.buffered;
+  if (b?.length) {
+    for (let i = 0; i < b.length; i++) {
+      if (b.end(i) <= currentTime + 0.05) {
+        prevEnd = b.end(i);
+      }
+    }
+  }
+  return { nextStart, gap: nextStart - currentTime, prevEnd };
+}
+
+/** Seconds of MSE data at/after playhead (includes across timeline holes). */
+export function progressiveBufferedAheadSec(
+  media: Bufferable | null,
+  currentTime: number,
+): number {
+  const tail = getLastBufferedEnd(media);
+  if (tail === null || !Number.isFinite(currentTime)) {
+    return 0;
+  }
+  return Math.max(0, tail - currentTime);
+}
+
+/** Jump target when next range is already buffered; does not skip file bytes. */
+export function progressiveHoleJumpTarget(
+  media: Bufferable | null,
+  currentTime: number,
+  maxJumpSec: number,
+  paddingSec: number = 0.05,
+): number | null {
+  const hole = getPlayheadBufferedHole(media, currentTime);
+  if (!hole || hole.gap > maxJumpSec) {
+    return null;
+  }
+  const bufInfo = BufferHelper.bufferInfo(media!, currentTime, 0);
+  if (!shouldJumpBufferedHole(bufInfo, currentTime, maxJumpSec)) {
+    return null;
+  }
+  return hole.nextStart + paddingSec;
 }
 
 /** Playhead past MSE data (scrubber uses playlist duration, buffer uses demux timeline). */
@@ -114,6 +228,10 @@ export function progressiveFwdBufferAnchor(
     BufferHelper.isBuffered(media, currentTime)
   ) {
     return currentTime;
+  }
+  const hole = getPlayheadBufferedHole(media, currentTime);
+  if (hole?.prevEnd != null) {
+    return Math.max(0, hole.prevEnd - 1e-3);
   }
   const lastEnd = getLastBufferedEnd(media);
   if (lastEnd !== null) {
@@ -232,7 +350,7 @@ export function progressiveFragNeedsMseCoverage(
   media: Bufferable | null,
   marginSec: number = 0.35,
 ): boolean {
-  const tail = getLastBufferedEnd(media);
+  const tail = getSerialMseAppendTail(media);
   if (tail === null) {
     return true;
   }
@@ -339,17 +457,17 @@ export function syncFlowTimelineFromDemux(
 export function shouldKeepFlowPrefetching(
   media: Bufferable | null,
   currentTime: number,
-  bufferLen: number,
-  maxBufLen: number,
+  _bufferLen: number,
+  maxAheadSec: number,
 ): boolean {
-  if (bufferLen < maxBufLen) {
-    return true;
-  }
-  const tail = getLastBufferedEnd(media);
-  if (tail === null || !Number.isFinite(currentTime)) {
+  if (getPlayheadBufferedHole(media, currentTime)) {
     return false;
   }
-  return tail - currentTime < maxBufLen - 0.5;
+  const ahead = progressiveBufferedAheadSec(media, currentTime);
+  if (Number.isFinite(currentTime)) {
+    return ahead < maxAheadSec - 0.25;
+  }
+  return _bufferLen < maxAheadSec;
 }
 
 /** True when playhead is at the end of a range and the next buffered range is already loaded. */

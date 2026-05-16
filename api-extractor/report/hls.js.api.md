@@ -723,6 +723,7 @@ export class BufferController extends Logger implements ComponentAPI {
     protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number;
     // (undocumented)
     protected shouldAllowBufferFlush(_data: BufferFlushingData): boolean;
+    protected shouldEmitQuotaErrorImmediately(): boolean;
     // (undocumented)
     protected shouldTrimBackBuffer(): boolean;
     // (undocumented)
@@ -1698,11 +1699,14 @@ export class FetchLoader implements Loader<LoaderContext> {
 export class FlowBufferController extends BufferController {
     constructor(hls: Hls, fragmentTracker: FragmentTracker);
     // (undocumented)
-    protected handleFlowQuotaExceeded(event: ErrorData, type: SourceBufferName): boolean;
+    destroy(): void;
     // (undocumented)
-    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, cc: number): number;
+    protected handleFlowQuotaExceeded(event: ErrorData, _type: SourceBufferName): boolean;
+    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number;
     // (undocumented)
     protected shouldAllowBufferFlush(data: BufferFlushingData): boolean;
+    // (undocumented)
+    protected shouldEmitQuotaErrorImmediately(): boolean;
     // (undocumented)
     protected shouldTrimBackBuffer(): boolean;
     // (undocumented)
@@ -4696,6 +4700,8 @@ export class StreamController extends BaseStreamController implements NetworkCom
     // (undocumented)
     getMainFwdBufferInfo(): BufferInfo | null;
     // (undocumented)
+    protected getMaxBufferLength(levelBitrate?: number): number;
+    // (undocumented)
     protected _handleFragmentLoadProgress(data: FragLoadedData): void;
     // (undocumented)
     get hasEnoughToStart(): boolean;
@@ -4757,6 +4763,7 @@ export type StreamControllerConfig = {
     progressiveTsScheduler: boolean;
     progressiveTsMaxHoleJump: number;
     progressiveStallMinForwardBuffer: number;
+    progressiveTsMaxAheadSec: number;
 };
 
 // Warning: (ae-missing-release-tag) "SubtitleFragProcessedData" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)

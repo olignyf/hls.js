@@ -241,6 +241,8 @@ export type StreamControllerConfig = {
   progressiveTsMaxHoleJump: number;
   /** With progressive TS: do not report BUFFER_STALLED when this much media is buffered ahead. */
   progressiveStallMinForwardBuffer: number;
+  /** Progressive TS: max demuxed seconds to buffer ahead of playhead (serial byte-range fetch). */
+  progressiveTsMaxAheadSec: number;
 };
 
 export type GapControllerConfig = {
@@ -407,6 +409,7 @@ export const hlsDefaultConfig: HlsConfig = {
   progressiveTsScheduler: false, // used by stream-controller, gap-controller
   progressiveTsMaxHoleJump: 120, // used by gap-controller (progressive TS)
   progressiveStallMinForwardBuffer: 2, // used by gap-controller (progressive TS)
+  progressiveTsMaxAheadSec: 10, // used by stream-controller, flow-buffer-controller (progressive TS)
   maxBufferSize: 60 * 1000 * 1000, // used by stream-controller
   maxFragLookUpTolerance: 0.25, // used by stream-controller
   maxBufferHole: 0.1, // used by stream-controller and gap-controller

@@ -5,6 +5,7 @@ import {
   loadWorker,
   removeWorkerFromStore as removeWorkerClient,
 } from './inject-worker';
+import { getSerialMseAppendTail } from '../controller/progressive-ts-scheduler';
 import Transmuxer, {
   isPromise,
   TransmuxConfig,
@@ -197,12 +198,12 @@ export default class TransmuxerInterface {
   ) {
     chunkMeta.transmuxing.start = self.performance.now();
     const { instanceNo, transmuxer } = this;
-    const timeOffset = part ? part.start : frag.start;
+    let timeOffset = part ? part.start : frag.start;
     // TODO: push "clear-lead" decrypt data for unencrypted fragments in streams with encrypted ones
     const decryptdata = frag.decryptdata;
     const lastFrag = this.frag;
 
-    const discontinuity = lastFrag ? frag.cc !== lastFrag.cc : true;
+    let discontinuity = lastFrag ? frag.cc !== lastFrag.cc : true;
     const trackSwitch = lastFrag ? chunkMeta.level !== lastFrag.level : true;
     const snDiff = lastFrag ? chunkMeta.sn - lastFrag.sn : -1;
     const partDiff = this.part ? chunkMeta.part - this.part.index : -1;
@@ -214,6 +215,14 @@ export default class TransmuxerInterface {
       !trackSwitch &&
       (snDiff === 1 ||
         (snDiff === 0 && (partDiff === 1 || (progressive && partDiff <= 0))));
+    const progressiveTs = this.hls.config.progressiveTsScheduler;
+    if (progressiveTs && snDiff === 1 && !trackSwitch) {
+      discontinuity = false;
+      const mseTail = getSerialMseAppendTail(this.hls.media);
+      if (mseTail !== null) {
+        timeOffset = mseTail;
+      }
+    }
     const now = self.performance.now();
 
     if (trackSwitch || snDiff || frag.stats.parsing.start === 0) {

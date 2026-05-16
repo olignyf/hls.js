@@ -1,7 +1,9 @@
 import { State } from './base-stream-controller';
 import {
   getLastBufferedEnd,
+  getPlayheadBufferedHole,
   isPlayheadPastBuffered,
+  progressiveHoleJumpTarget,
   progressiveShouldIgnoreStallReport,
   shouldJumpBufferedHole,
 } from './progressive-ts-scheduler';
@@ -15,6 +17,7 @@ import {
   removeEventListener,
 } from '../utils/event-listener-helper';
 import { stringify } from '../utils/safe-json-stringify';
+import type { HlsConfig } from '../config';
 import type { InFlightData } from './base-stream-controller';
 import type { InFlightFragments } from '../hls';
 import type Hls from '../hls';
@@ -176,6 +179,15 @@ export default class GapController extends TaskLoop {
 
     this.seeking = seeking;
 
+    if (
+      config.progressiveTsScheduler &&
+      !seeking &&
+      !pausedEndedOrHalted &&
+      this.tryProgressiveBufferedHoleJump(media, currentTime, config)
+    ) {
+      return;
+    }
+
     // The playhead is moving, no-op
     if (currentTime !== lastCurrentTime) {
       if (lastCurrentTime) {
@@ -316,6 +328,12 @@ export default class GapController extends TaskLoop {
         this.hls.trigger(Events.MEDIA_ENDED, {
           stalled: true,
         });
+        return;
+      }
+      if (
+        config.progressiveTsScheduler &&
+        this.tryProgressiveBufferedHoleJump(media, currentTime, config)
+      ) {
         return;
       }
       const minFwd = config.progressiveStallMinForwardBuffer ?? 2;
@@ -470,6 +488,12 @@ export default class GapController extends TaskLoop {
     const levelDetails = this.hls?.latestLevelDetails;
     if (
       config.progressiveTsScheduler &&
+      this.tryProgressiveBufferedHoleJump(media, currentTime, config)
+    ) {
+      return;
+    }
+    if (
+      config.progressiveTsScheduler &&
       !media.paused &&
       isPlayheadPastBuffered(media, currentTime, 1) &&
       !media.seeking
@@ -484,7 +508,6 @@ export default class GapController extends TaskLoop {
       }
     }
     if (
-      !config.progressiveTsScheduler &&
       shouldJumpBufferedHole(
         bufferInfo,
         currentTime,
@@ -493,7 +516,7 @@ export default class GapController extends TaskLoop {
     ) {
       const targetTime = bufferInfo.nextStart! + config.skipBufferHolePadding;
       this.warn(
-        `progressive TS: jump buffered hole ${currentTime.toFixed(3)} → ${targetTime.toFixed(3)}`,
+        `jump buffered hole ${currentTime.toFixed(3)} → ${targetTime.toFixed(3)}`,
       );
       this.moved = true;
       media.currentTime = targetTime;
@@ -526,6 +549,10 @@ export default class GapController extends TaskLoop {
         config.progressiveStallMinForwardBuffer ?? 2,
       )
     ) {
+      return;
+    }
+
+    if (config.progressiveTsScheduler && bufferInfo.len < 0.5) {
       return;
     }
 
@@ -745,6 +772,35 @@ export default class GapController extends TaskLoop {
         bufferInfo,
       });
     }
+  }
+
+  /**
+   * PTS discontinuity: MSE has a later range already buffered — seek playhead there.
+   * Does not skip file bytes; only crosses a demux timeline hole.
+   */
+  private tryProgressiveBufferedHoleJump(
+    media: HTMLMediaElement,
+    currentTime: number,
+    config: HlsConfig,
+  ): boolean {
+    const target = progressiveHoleJumpTarget(
+      media,
+      currentTime,
+      config.progressiveTsMaxHoleJump,
+      config.skipBufferHolePadding,
+    );
+    if (target === null) {
+      return false;
+    }
+    const hole = getPlayheadBufferedHole(media, currentTime);
+    this.log(
+      `progressive TS: jump MSE hole ${currentTime.toFixed(3)} → ${target.toFixed(3)} (gap ${hole?.gap.toFixed(3)}s; next range already in buffer)`,
+    );
+    media.currentTime = target;
+    this.moved = true;
+    this.stallResolved(currentTime);
+    this.hls?.startLoad(-1);
+    return true;
   }
 }
 

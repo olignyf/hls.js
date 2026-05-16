@@ -5,27 +5,83 @@ import {
   flowAllowsBufferFlush,
   flowShouldTrimFrontBuffer,
 } from './flow-buffer-policy';
-import { ErrorDetails } from '../errors';
+import {
+  getProgressiveMaxAheadSec,
+  getSerialMseAppendTail,
+} from './progressive-ts-scheduler';
+import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
+import { PlaylistLevelType } from '../types/loader';
 import type { FragmentTracker } from './fragment-tracker';
 import type Hls from '../hls';
+import type { MediaFragment, Part } from '../loader/fragment';
 import type { SourceBufferName } from '../types/buffer';
 import type { BufferFlushingData, ErrorData } from '../types/events';
+import type { ChunkMetadata } from '../types/transmuxer';
+
+type QuotaRetryContext = {
+  frag: MediaFragment;
+  part: Part | null;
+  chunkMeta: ChunkMetadata;
+};
 
 /**
  * MSE buffer policy for progressive TS ("go with the flow"):
  * - VoD byte-range and live TS with discontinuities
- * - No full-buffer flush on quota; evict behind playhead / old ranges
- * - No front flush across timeline holes
- * - Timestamp offsets follow demuxed fragment starts on discontinuity
+ * - No full-buffer flush on quota; evict behind/ahead of playhead
+ * - Defer append retry until BUFFER_FLUSHED completes
  */
 export default class FlowBufferController extends BufferController {
+  private quotaRetry: QuotaRetryContext | null = null;
+  private quotaFlushDoneTimer: number = -1;
+
   constructor(hls: Hls, fragmentTracker: FragmentTracker) {
     super(hls, fragmentTracker);
+    hls.on(Events.BUFFER_FLUSHED, this.onFlowBufferFlushed, this);
   }
+
+  public override destroy(): void {
+    const hls = this.getHlsInstance();
+    hls.off(Events.BUFFER_FLUSHED, this.onFlowBufferFlushed, this);
+    self.clearTimeout(this.quotaFlushDoneTimer);
+    this.quotaRetry = null;
+    super.destroy();
+  }
+
+  private onFlowBufferFlushed = (): void => {
+    if (!this.quotaRetry) {
+      return;
+    }
+    self.clearTimeout(this.quotaFlushDoneTimer);
+    this.quotaFlushDoneTimer = self.setTimeout(() => {
+      const ctx = this.quotaRetry;
+      this.quotaRetry = null;
+      if (!ctx) {
+        return;
+      }
+      this.log(
+        `flow buffer: quota flush done — retry sn ${ctx.frag.sn} append`,
+      );
+      this.getHlsInstance().trigger(Events.ERROR, {
+        type: ErrorTypes.MEDIA_ERROR,
+        parent: PlaylistLevelType.MAIN,
+        details: ErrorDetails.BUFFER_APPEND_ERROR,
+        fatal: false,
+        frag: ctx.frag,
+        part: ctx.part,
+        chunkMeta: ctx.chunkMeta,
+        error: new Error('flow buffer quota retry'),
+        errorAction: createDoNothingErrorAction(true),
+      });
+    }, 0);
+  };
 
   protected override useFlowBufferPolicy(): boolean {
     return true;
+  }
+
+  protected override shouldEmitQuotaErrorImmediately(): boolean {
+    return !this.quotaRetry;
   }
 
   protected override shouldAllowBufferFlush(data: BufferFlushingData): boolean {
@@ -50,47 +106,56 @@ export default class FlowBufferController extends BufferController {
 
   protected override handleFlowQuotaExceeded(
     event: ErrorData,
-    type: SourceBufferName,
+    _type: SourceBufferName,
   ): boolean {
     const media = this.getMediaElement();
-    if (!media) {
+    if (!media || !event.frag || !event.chunkMeta) {
       return false;
     }
     const ct = media.currentTime;
     const hls = this.getHlsInstance();
-    const keepBehind = Math.min(
-      30,
-      Math.max(8, hls.config.maxBufferLength * 0.4),
-    );
-    const range = computeFlowEvictRange(media, ct, keepBehind);
-    if (range) {
-      this.log(
-        `flow buffer: quota — evict [${range.start.toFixed(3)}, ${range.end.toFixed(3)}] (playhead ${ct.toFixed(3)})`,
-      );
-      hls.trigger(Events.BUFFER_FLUSHING, {
-        startOffset: range.start,
-        endOffset: range.end,
-        type,
-      });
-    } else {
+    const maxAhead = getProgressiveMaxAheadSec(hls.config);
+    const keepBehind = Math.min(12, Math.max(2, maxAhead * 0.25));
+    const range = computeFlowEvictRange(media, ct, keepBehind, maxAhead);
+    if (!range) {
       this.warn(
-        `flow buffer: quota at ${ct.toFixed(3)} — no safe evict range; retry append`,
+        `flow buffer: quota at ${ct.toFixed(3)} — could not compute evict range`,
       );
+      return false;
     }
+
+    this.log(
+      `flow buffer: quota — evict [${range.start.toFixed(3)}, ${range.end.toFixed(3)}] (playhead ${ct.toFixed(3)})`,
+    );
+    this.quotaRetry = {
+      frag: event.frag as MediaFragment,
+      part: event.part ?? null,
+      chunkMeta: event.chunkMeta,
+    };
+    hls.trigger(Events.BUFFER_FLUSHING, {
+      startOffset: range.start,
+      endOffset: range.end,
+      type: null,
+    });
     event.details = ErrorDetails.BUFFER_APPEND_ERROR;
     event.fatal = false;
     event.errorAction = createDoNothingErrorAction(true);
     return true;
   }
 
-  /** Let the remuxer stitch timestamps; do not reset offset on discontinuity (CC). */
+  /** Serial progressive: stitch at MSE tail, not playlist frag.start on init-only appends. */
   protected override resolveFlowTimestampOffset(
     fragStart: number,
     remuxOffset: number | undefined,
     _cc: number,
   ): number {
-    return remuxOffset !== undefined && Number.isFinite(remuxOffset)
-      ? remuxOffset
-      : fragStart;
+    if (remuxOffset !== undefined && Number.isFinite(remuxOffset)) {
+      return remuxOffset;
+    }
+    const tail = getSerialMseAppendTail(this.getMediaElement());
+    if (tail !== null) {
+      return tail;
+    }
+    return fragStart;
   }
 }

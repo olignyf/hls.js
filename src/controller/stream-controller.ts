@@ -5,10 +5,14 @@ import { MAX_START_GAP_JUMP } from './gap-controller';
 import {
   clearBogusOkFragmentsAhead,
   getLastBufferedEnd,
+  getPlayheadBufferedHole,
+  getProgressiveMaxAheadSec,
+  getSerialMseAppendTail,
   isPlayheadPastBuffered,
   pickNextProgressiveFragment,
   progressiveFragNeedsMseCoverage,
   progressiveFwdBufferAnchor,
+  progressiveHoleJumpTarget,
   progressiveLoadTarget,
   shouldKeepFlowPrefetching,
   syncFlowTimelineFromDemux,
@@ -329,7 +333,7 @@ export default class StreamController
 
     // set next load level : this will trigger a playlist load if needed
     if (hls.loadLevel !== level && hls.manualLevel === -1) {
-      this.log(`Adapting to level ${level} from level ${this.level}`);
+      // FIXME this.log(`Adapting to level ${level} from level ${this.level}`);
     }
     this.level = hls.nextLoadLevel = level;
 
@@ -351,7 +355,9 @@ export default class StreamController
     const bufferLen = bufferInfo.len;
 
     // compute max Buffer Length that we could get from this load level, based on level bitrate. don't buffer more than 60 MB and more than 30s
-    const maxBufLen = this.getMaxBufferLength(levelInfo.maxBitrate);
+    const maxBufLen = hls.config.progressiveTsScheduler
+      ? getProgressiveMaxAheadSec(hls.config)
+      : this.getMaxBufferLength(levelInfo.maxBitrate);
 
     if (hls.config.progressiveTsScheduler) {
       const ct = media?.currentTime ?? 0;
@@ -961,7 +967,13 @@ export default class StreamController
     const videoCodec = currentLevel.videoCodec;
 
     // time Offset is accurate if level PTS is known, or if playlist is not sliding (not live)
-    const accurateTimeOffset = details.PTSKnown || !details.live;
+    let accurateTimeOffset = details.PTSKnown || !details.live;
+    if (this.hls.config.progressiveTsScheduler) {
+      const mseTail = getSerialMseAppendTail(this.media);
+      if (mseTail !== null) {
+        accurateTimeOffset = false;
+      }
+    }
     const initSegmentData = frag.initSegment?.data;
     const videoOnly =
       typeof globalThis !== 'undefined' &&
@@ -1748,6 +1760,18 @@ export default class StreamController
             return Math.max(0, lastEnd - 1e-3);
           }
         }
+        const jump = progressiveHoleJumpTarget(
+          media,
+          ct,
+          this.hls.config.progressiveTsMaxHoleJump,
+        );
+        if (jump !== null) {
+          return jump;
+        }
+        const hole = getPlayheadBufferedHole(media, ct);
+        if (hole?.prevEnd != null) {
+          return hole.prevEnd;
+        }
       }
       if (this.nextLoadPosition >= 0) {
         return this.nextLoadPosition;
@@ -1818,7 +1842,7 @@ export default class StreamController
         }
         this.progressiveSeekSn = null;
       }
-      const mseTail = getLastBufferedEnd(this.media);
+      const mseTail = getSerialMseAppendTail(this.media);
       if (mseTail !== null) {
         this.nextLoadPosition = mseTail;
       }
@@ -1830,7 +1854,17 @@ export default class StreamController
     super.fragBufferedComplete(frag, part);
   }
 
+  protected getMaxBufferLength(levelBitrate?: number): number {
+    if (this.hls.config.progressiveTsScheduler) {
+      return getProgressiveMaxAheadSec(this.hls.config);
+    }
+    return super.getMaxBufferLength(levelBitrate);
+  }
+
   public get maxBufferLength(): number {
+    if (this.hls.config.progressiveTsScheduler) {
+      return getProgressiveMaxAheadSec(this.hls.config);
+    }
     const { levels, level } = this;
     const levelInfo = levels?.[level];
     if (!levelInfo) {

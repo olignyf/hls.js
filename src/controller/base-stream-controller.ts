@@ -5,6 +5,11 @@ import {
   findNearestWithCC,
 } from './fragment-finders';
 import { FragmentState } from './fragment-tracker';
+import {
+  getLastBufferedEnd,
+  getSerialMseAppendTail,
+  progressiveContinuousAppendOffset,
+} from './progressive-ts-scheduler';
 import Decrypter from '../crypt/decrypter';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
@@ -1350,9 +1355,23 @@ export default class BaseStreamController
     const offsetTimestamp = this.initPTS[frag.cc] as
       | TimestampOffset
       | undefined;
-    const offset = offsetTimestamp
-      ? -offsetTimestamp.baseTime / offsetTimestamp.timescale
-      : undefined;
+    let offset: number | undefined;
+    if (this.hls.config.progressiveTsScheduler) {
+      offset = progressiveContinuousAppendOffset(this.media, offsetTimestamp);
+      if (offsetTimestamp && offset !== undefined && isMediaFragment(frag)) {
+        const stock = -offsetTimestamp.baseTime / offsetTimestamp.timescale;
+        if (Math.abs(stock - offset) > 1) {
+          const tail = getSerialMseAppendTail(this.media);
+          this.log(
+            `progressive TS: stitch sn ${frag.sn} cc ${frag.cc} MSE tsOffset ${offset.toFixed(3)} @ serial tail ${tail?.toFixed(3)} (stock initPTS offset ${stock.toFixed(3)}; frag.startPTS ${frag.startPTS})`,
+          );
+        }
+      }
+    } else {
+      offset = offsetTimestamp
+        ? -offsetTimestamp.baseTime / offsetTimestamp.timescale
+        : undefined;
+    }
     const segment: BufferAppendingData = {
       type: data.type,
       frag,

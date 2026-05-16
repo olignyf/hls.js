@@ -167,6 +167,11 @@ export default class BufferController extends Logger implements ComponentAPI {
     return false;
   }
 
+  /** When false, FlowBufferController defers ERROR until after BUFFER_FLUSHED. */
+  protected shouldEmitQuotaErrorImmediately(): boolean {
+    return true;
+  }
+
   protected resolveFlowTimestampOffset(
     fragStart: number,
     remuxOffset: number | undefined,
@@ -975,7 +980,9 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
         ) {
           if (this.handleFlowQuotaExceeded(event, type)) {
             this.appendError = event;
-            this.hls.trigger(Events.ERROR, event);
+            if (this.shouldEmitQuotaErrorImmediately()) {
+              this.hls.trigger(Events.ERROR, event);
+            }
             return;
           }
           // QuotaExceededError: http://www.w3.org/TR/html5/infrastructure.html#quotaexceedederror

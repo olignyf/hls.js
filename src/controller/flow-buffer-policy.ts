@@ -26,39 +26,72 @@ export function flowShouldTrimFrontBuffer(media: Bufferable | null): boolean {
   return media.buffered.length < 2;
 }
 
+function activeBufferedIndex(
+  media: Bufferable,
+  currentTime: number,
+): number | null {
+  const b = media.buffered;
+  if (!b.length) {
+    return null;
+  }
+  for (let i = 0; i < b.length; i++) {
+    const s = b.start(i);
+    const e = b.end(i);
+    if (currentTime >= s - 0.25 && currentTime <= e + 0.25) {
+      return i;
+    }
+    if (currentTime < s) {
+      return i > 0 ? i - 1 : 0;
+    }
+  }
+  return b.length - 1;
+}
+
 /**
- * On quota: trim only within the buffered range that contains the playhead.
- * Never drops whole prior ranges (PTS discontinuities stay in MSE until back-trim).
+ * On quota: free space behind the playhead, then far-ahead prefetch, then ranges
+ * fully before the playhead. Never removes data at/after `currentTime`.
  */
 export function computeFlowEvictRange(
   media: Bufferable,
   currentTime: number,
   keepBehindSec: number = 12,
+  maxAheadSec: number = 30,
 ): FlowEvictRange | null {
   const b = media.buffered;
   if (!b.length) {
     return null;
   }
 
-  let activeIdx = 0;
-  for (let i = 0; i < b.length; i++) {
-    const s = b.start(i);
-    const e = b.end(i);
-    if (currentTime >= s - 0.25 && currentTime <= e + 0.25) {
-      activeIdx = i;
-      break;
-    }
-    if (currentTime < s) {
-      return null;
-    }
-    activeIdx = i;
+  const activeIdx = activeBufferedIndex(media, currentTime);
+  if (activeIdx === null) {
+    return null;
   }
 
   const rangeStart = b.start(activeIdx);
   const rangeEnd = b.end(activeIdx);
-  const evictEnd = Math.min(rangeEnd, currentTime - keepBehindSec);
-  if (evictEnd > rangeStart + 0.5) {
-    return { start: rangeStart, end: evictEnd };
+
+  const behindSteps = [keepBehindSec, 4, 1, 0];
+  for (let i = 0; i < behindSteps.length; i++) {
+    const behind = behindSteps[i];
+    const evictEnd = Math.min(rangeEnd, currentTime - behind);
+    if (evictEnd > rangeStart + 0.5) {
+      return { start: rangeStart, end: evictEnd };
+    }
+  }
+
+  const aheadStart = currentTime + maxAheadSec;
+  if (aheadStart < rangeEnd - 0.5) {
+    return {
+      start: Math.max(rangeStart, aheadStart),
+      end: rangeEnd,
+    };
+  }
+
+  if (activeIdx > 0) {
+    const prevEnd = b.end(activeIdx - 1);
+    if (prevEnd < currentTime - 0.25) {
+      return { start: b.start(0), end: prevEnd };
+    }
   }
 
   return null;
