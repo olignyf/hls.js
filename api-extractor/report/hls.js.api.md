@@ -4652,7 +4652,11 @@ export class StreamController extends BaseStreamController implements NetworkCom
     protected flushMainBuffer(startOffset: number, endOffset: number): void;
     // (undocumented)
     get forceStartLoad(): boolean;
+    // (undocumented)
+    protected fragBufferedComplete(frag: Fragment, part: Part | null): void;
     protected getBufferOutput(): Bufferable | null;
+    // (undocumented)
+    protected getLoadPosition(): number;
     // (undocumented)
     getMainFwdBufferInfo(): BufferInfo | null;
     // (undocumented)

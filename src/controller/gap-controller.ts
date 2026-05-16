@@ -1,5 +1,9 @@
 import { State } from './base-stream-controller';
-import { shouldJumpBufferedHole } from './progressive-ts-scheduler';
+import {
+  getLastBufferedEnd,
+  isPlayheadPastBuffered,
+  shouldJumpBufferedHole,
+} from './progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import TaskLoop from '../task-loop';
@@ -445,6 +449,21 @@ export default class GapController extends TaskLoop {
     }
 
     const levelDetails = this.hls?.latestLevelDetails;
+    if (
+      config.progressiveTsScheduler &&
+      !media.paused &&
+      isPlayheadPastBuffered(media, currentTime, 1) &&
+      !media.seeking
+    ) {
+      const lastEnd = getLastBufferedEnd(media);
+      if (lastEnd !== null) {
+        this.warn(
+          `progressive TS: playhead past buffer ${currentTime.toFixed(3)} > ${lastEnd.toFixed(3)}, holding at tail`,
+        );
+        media.currentTime = Math.max(0, lastEnd - 0.05);
+        return;
+      }
+    }
     if (
       config.progressiveTsScheduler &&
       shouldJumpBufferedHole(

@@ -4,6 +4,11 @@ import {
   isMediaFragment,
   type MediaFragment,
 } from '../loader/fragment';
+import {
+  type Bufferable,
+  BufferHelper,
+  type BufferInfo,
+} from '../utils/buffer-helper';
 import type { LevelDetails } from '../loader/level-details';
 
 /**
@@ -51,12 +56,71 @@ export function findFragmentIndexByByte(
   return lo;
 }
 
+export function getLastBufferedEnd(media: Bufferable | null): number | null {
+  if (!media) {
+    return null;
+  }
+  const ranges = BufferHelper.bufferedRanges(media);
+  if (!ranges.length) {
+    return null;
+  }
+  return ranges[ranges.length - 1].end;
+}
+
+/** Playhead past MSE data (scrubber uses playlist duration, buffer uses demux timeline). */
+export function isPlayheadPastBuffered(
+  media: Bufferable | null,
+  currentTime: number,
+  marginSec: number = 0.5,
+): boolean {
+  if (!media || !Number.isFinite(currentTime)) {
+    return false;
+  }
+  if (BufferHelper.isBuffered(media, currentTime)) {
+    return false;
+  }
+  const lastEnd = getLastBufferedEnd(media);
+  return lastEnd !== null && currentTime > lastEnd + marginSec;
+}
+
+export function progressiveFwdBufferAnchor(
+  media: Bufferable | null,
+  currentTime: number,
+): number {
+  if (
+    media &&
+    Number.isFinite(currentTime) &&
+    BufferHelper.isBuffered(media, currentTime)
+  ) {
+    return currentTime;
+  }
+  const lastEnd = getLastBufferedEnd(media);
+  if (lastEnd !== null) {
+    return Math.max(0, lastEnd - 1e-3);
+  }
+  return Number.isFinite(currentTime) ? Math.max(0, currentTime) : 0;
+}
+
+export function progressiveLoadTarget(
+  bufferInfo: BufferInfo,
+  media: Bufferable | null,
+  currentTime: number,
+): number {
+  if (isPlayheadPastBuffered(media, currentTime)) {
+    const lastEnd = getLastBufferedEnd(media);
+    return lastEnd !== null ? lastEnd : bufferInfo.end;
+  }
+  return bufferInfo.end;
+}
+
 export type PickNextProgressiveOpts = {
   /** Live TS: load next SN only; no byte-ratio seek. */
   liveSequential: boolean;
-  /** User/media seek target (seconds). Used only when `knownFileBytes` is set. */
+  /** Playlist-time seek / scrub position (seconds). */
   seekMediaTime?: number;
   knownFileBytes?: number | null;
+  /** When true, pick by byte ratio from `seekMediaTime` instead of sn+1. */
+  forceByteSeek?: boolean;
 };
 
 export function pickNextProgressiveFragment(
@@ -72,22 +136,24 @@ export function pickNextProgressiveFragment(
 
   let startIdx = 0;
 
-  if (
-    opts.liveSequential ||
-    opts.seekMediaTime === undefined ||
-    !opts.knownFileBytes ||
-    !details.totalduration
-  ) {
-    if (fragPrevious) {
-      startIdx = fragPrevious.sn - details.startSN + 1;
-    }
-  } else {
+  const useByteSeek =
+    !opts.liveSequential &&
+    opts.forceByteSeek &&
+    opts.seekMediaTime !== undefined &&
+    !!opts.knownFileBytes &&
+    !!details.totalduration;
+
+  if (useByteSeek) {
     const ratio = Math.max(
       0,
-      Math.min(1, opts.seekMediaTime / details.totalduration),
+      Math.min(1, opts.seekMediaTime! / details.totalduration),
     );
-    const bytePos = Math.floor(ratio * opts.knownFileBytes);
+    const bytePos = Math.floor(ratio * opts.knownFileBytes!);
     startIdx = findFragmentIndexByByte(frags, bytePos);
+  } else if (opts.liveSequential || !fragPrevious) {
+    startIdx = 0;
+  } else {
+    startIdx = fragPrevious.sn - details.startSN + 1;
   }
 
   if (startIdx < 0) {

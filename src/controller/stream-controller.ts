@@ -3,7 +3,11 @@ import { findFragmentByPTS } from './fragment-finders';
 import { FragmentState } from './fragment-tracker';
 import { MAX_START_GAP_JUMP } from './gap-controller';
 import {
+  getLastBufferedEnd,
+  isPlayheadPastBuffered,
   pickNextProgressiveFragment,
+  progressiveFwdBufferAnchor,
+  progressiveLoadTarget,
   vodFileBytesFromDetails,
 } from './progressive-ts-scheduler';
 import TransmuxerInterface from '../demux/transmuxer-interface';
@@ -22,7 +26,7 @@ import {
 import { useAlternateAudio } from '../utils/rendition-helper';
 import type { FragmentTracker } from './fragment-tracker';
 import type Hls from '../hls';
-import type { Fragment, MediaFragment } from '../loader/fragment';
+import type { Fragment, MediaFragment, Part } from '../loader/fragment';
 import type KeyLoader from '../loader/key-loader';
 import type { LevelDetails } from '../loader/level-details';
 import type {
@@ -77,6 +81,8 @@ export default class StreamController
   private _backtrackFragment: Fragment | undefined = undefined;
   private audioCodecSwitch: boolean = false;
   private videoBuffer: ExtendedSourceBuffer | null = null;
+  /** sn being loaded after scrub past demuxed MSE tail (playlist time ≠ buffer time). */
+  private progressiveSeekSn: number | null = null;
 
   constructor(
     hls: Hls,
@@ -236,6 +242,8 @@ export default class StreamController
     this.checkFragmentChanged();
   }
 
+  // Why: This function is called when the stream controller is in the IDLE state.
+  // It is used to load the next fragment.
   private doTickIdle() {
     const { hls, levelLastLoaded, levels, media } = this;
 
@@ -256,7 +264,9 @@ export default class StreamController
       return;
     }
 
+    // Levels are like codecContexts in a media decoder, not audio-specific
     if (!levels?.length) {
+      // No variant levels loaded yet — wait for MANIFEST_LOADED / LEVELS_UPDATED
       return;
     }
     this.clampNextLoadPositionFromPlayheadFwdBuffer();
@@ -331,19 +341,28 @@ export default class StreamController
       }
       const liveSequential = !!levelDetails.live && levelDetails.type !== 'VOD';
       const knownFileBytes = vodFileBytesFromDetails(levelDetails);
-      const seeking = !!media?.seeking;
+      const ct = media?.currentTime ?? 0;
+      const pastBuffered = !!media && isPlayheadPastBuffered(media, ct, 0.5);
+      const forceByteSeek =
+        !liveSequential &&
+        !!knownFileBytes &&
+        (pastBuffered || !!media?.seeking);
       const progFrag = pickNextProgressiveFragment(
         levelDetails,
-        this.fragPrevious,
+        forceByteSeek ? null : this.fragPrevious,
         (f) => this.fragmentTracker.getState(f),
         {
           liveSequential,
           knownFileBytes,
           seekMediaTime:
-            !liveSequential && seeking && media ? media.currentTime : undefined,
+            !liveSequential && media && Number.isFinite(ct) ? ct : undefined,
+          forceByteSeek,
         },
       );
       let frag: Fragment | null = progFrag;
+      if (frag && isMediaFragment(frag) && pastBuffered) {
+        this.progressiveSeekSn = frag.sn;
+      }
       if (frag) {
         frag = this.mapToInitFragWhenRequired(frag);
       }
@@ -351,7 +370,8 @@ export default class StreamController
         frag = frag.initSegment;
       }
       if (frag) {
-        this.loadFragment(frag, levelInfo, bufferInfo.end);
+        const target = progressiveLoadTarget(bufferInfo, media, ct);
+        this.loadFragment(frag, levelInfo, target);
       }
       return;
     }
@@ -1661,7 +1681,68 @@ export default class StreamController
   public getMainFwdBufferInfo(): BufferInfo | null {
     // Observe video SourceBuffer (this.mediaBuffer) only when alt-audio is used, otherwise observe combined media buffer
     const bufferOutput = this.getBufferOutput();
+    if (this.hls.config.progressiveTsScheduler && this.media) {
+      const anchor = progressiveFwdBufferAnchor(
+        this.media,
+        this.media.currentTime,
+      );
+      return this.getFwdBufferInfoAtPos(
+        bufferOutput,
+        anchor,
+        PlaylistLevelType.MAIN,
+        this.config.maxBufferHole,
+      );
+    }
     return this.getFwdBufferInfo(bufferOutput, PlaylistLevelType.MAIN);
+  }
+
+  protected getLoadPosition(): number {
+    if (this.hls.config.progressiveTsScheduler) {
+      const { media } = this;
+      if (media && Number.isFinite(media.currentTime)) {
+        const ct = media.currentTime;
+        if (BufferHelper.isBuffered(media, ct)) {
+          return ct;
+        }
+        if (isPlayheadPastBuffered(media, ct, 0.5)) {
+          const lastEnd = getLastBufferedEnd(media);
+          if (lastEnd !== null) {
+            return Math.max(0, lastEnd - 1e-3);
+          }
+        }
+      }
+      if (this.nextLoadPosition >= 0) {
+        return this.nextLoadPosition;
+      }
+      return 0;
+    }
+    return super.getLoadPosition();
+  }
+
+  protected fragBufferedComplete(frag: Fragment, part: Part | null) {
+    if (
+      this.hls.config.progressiveTsScheduler &&
+      isMediaFragment(frag) &&
+      this.media
+    ) {
+      const seekSn = this.progressiveSeekSn;
+      if (seekSn !== null && frag.sn === seekSn) {
+        const ranges = BufferHelper.bufferedRanges(this.media);
+        const appended = ranges[ranges.length - 1];
+        if (appended) {
+          this.log(
+            `progressive TS: seek sn ${seekSn} buffered @${appended.start.toFixed(3)} (scrub target in playlist time)`,
+          );
+          this.media.currentTime = appended.start + 0.05;
+        }
+        this.progressiveSeekSn = null;
+      }
+      const mseTail = getLastBufferedEnd(this.media);
+      if (mseTail !== null) {
+        this.nextLoadPosition = mseTail;
+      }
+    }
+    super.fragBufferedComplete(frag, part);
   }
 
   public get maxBufferLength(): number {
