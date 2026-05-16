@@ -11,6 +11,7 @@ import {
 } from '../utils/buffer-helper';
 import type { HlsConfig } from '../config';
 import type { LevelDetails } from '../loader/level-details';
+import type { TimestampOffset } from '../utils/timescale-conversion';
 
 /** Max seconds of demuxed media to keep ahead of playhead in progressive TS mode. */
 export function getProgressiveMaxAheadSec(
@@ -89,6 +90,14 @@ export function findFragmentIndexByByte(
   return lo;
 }
 
+/** Same MPEG-TS timeline for every byte-range chunk — use first initPTS, not per-cc. */
+export function getProgressiveInitPTS(
+  initPTS: Array<TimestampOffset | undefined>,
+): TimestampOffset | undefined {
+  const row = initPTS[0];
+  return row?.timescale ? row : undefined;
+}
+
 /**
  * End of the contiguous buffered prefix from the first range (stops at the first MSE hole).
  * Serial progressive append must stitch here — not at a mis-timed later TimeRange.
@@ -114,23 +123,96 @@ export function getSerialMseAppendTail(
   return tail;
 }
 
+/** Evict a mis-stitched high-timestamp MSE island (serial tail is still near playhead). */
+// FIXME verify if needed
+export function progressiveBogusIslandEvictRange(
+  media: Bufferable | null,
+): { start: number; end: number } | null {
+  const serialTail = getSerialMseAppendTail(media);
+  if (serialTail === null) {
+    return null;
+  }
+  const ranges = BufferHelper.bufferedRanges(media);
+  for (let i = 0; i < ranges.length; i++) {
+    if (ranges[i].start > serialTail + 1) {
+      return { start: ranges[i].start, end: ranges[i].end };
+    }
+  }
+  return null;
+}
+
 /**
- * MSE timestampOffset for progressive TS: remuxed fMP4 sample times are already
- * initPTS-normalized (~0 at each fragment). Place the next fragment at the serial
- * buffer tail, not tail − initPTS (which double-subtracts and lands at ~128s).
+ * MSE timestampOffset for progressive TS byte-range: transmuxed fMP4 sample decode
+ * times stay on the MPEG-TS initPTS axis (~92220s). Presentation time is
+ * decodeTime + timestampOffset, so use a constant −initPTS for every chunk — not
+ * tail − initPTS (that only works when decode times are 0-based per fragment).
  */
 export function progressiveContinuousAppendOffset(
-  media: Bufferable | null,
+  _media: Bufferable | null,
   initPTS: { baseTime: number; timescale: number } | undefined,
 ): number | undefined {
-  const tail = getSerialMseAppendTail(media);
-  if (tail !== null && Number.isFinite(tail)) {
-    return tail;
-  }
   if (!initPTS?.timescale) {
     return undefined;
   }
   return -initPTS.baseTime / initPTS.timescale;
+}
+
+/** True when serial MSE timeline includes this fragment's demuxed end. */
+export function progressiveSerialMseCoversFrag(
+  media: Bufferable | null,
+  frag: MediaFragment,
+  marginSec: number = 0.35,
+): boolean {
+  const tail = getSerialMseAppendTail(media);
+  if (tail === null) {
+    return false;
+  }
+  const expectEnd =
+    Number.isFinite(frag.endPTS) && (frag.endPTS as number) > 0
+      ? (frag.endPTS as number)
+      : frag.start + frag.duration;
+  return tail + marginSec >= expectEnd;
+}
+
+/**
+ * Gate serial prefetch: enough ahead in MSE, and the last fragment actually landed
+ * before pulling another ~4MB chunk.
+ */
+export function progressiveShouldLoadNextFragment(
+  media: Bufferable | null,
+  currentTime: number,
+  maxAheadSec: number,
+  fragPrevious: MediaFragment | null,
+  initPTS?: Array<TimestampOffset | undefined>,
+  lastBufferedFrag?: MediaFragment | null,
+): boolean {
+  const hasInitPTS = !!getProgressiveInitPTS(initPTS ?? [])?.timescale;
+  if (!hasInitPTS) {
+    // initPTS is discovered by transmuxing the first byte-range chunk — do not
+    // block the bootstrap load waiting for it.
+    if (
+      getSerialMseAppendTail(media) === null &&
+      !fragPrevious &&
+      !lastBufferedFrag
+    ) {
+      return shouldKeepFlowPrefetching(media, currentTime, 0, maxAheadSec);
+    }
+    return false;
+  }
+  if (!shouldKeepFlowPrefetching(media, currentTime, 0, maxAheadSec)) {
+    return false;
+  }
+  const coverageFrag = lastBufferedFrag ?? fragPrevious;
+  if (coverageFrag && !progressiveSerialMseCoversFrag(media, coverageFrag)) {
+    return false;
+  }
+  if (fragPrevious && !progressiveSerialMseCoversFrag(media, fragPrevious)) {
+    return false;
+  }
+  if (fragPrevious && progressiveFragNeedsMseCoverage(fragPrevious, media)) {
+    return false;
+  }
+  return true;
 }
 
 export function getLastBufferedEnd(media: Bufferable | null): number | null {
@@ -172,12 +254,12 @@ export function getPlayheadBufferedHole(
   return { nextStart, gap: nextStart - currentTime, prevEnd };
 }
 
-/** Seconds of MSE data at/after playhead (includes across timeline holes). */
+/** Seconds of demuxed media at/after playhead on the serial timeline (ignores mis-timed ranges). */
 export function progressiveBufferedAheadSec(
   media: Bufferable | null,
   currentTime: number,
 ): number {
-  const tail = getLastBufferedEnd(media);
+  const tail = getSerialMseAppendTail(media);
   if (tail === null || !Number.isFinite(currentTime)) {
     return 0;
   }
@@ -377,10 +459,12 @@ export function clearBogusOkFragmentsAhead(
       continue;
     }
     const st = getState(f);
-    if (st === FragmentState.OK && progressiveFragNeedsMseCoverage(f, media)) {
-      removeFragment(f);
-    } else if (st === FragmentState.NOT_LOADED) {
-      break;
+    if (st === FragmentState.OK) {
+      if (progressiveFragNeedsMseCoverage(f, media)) {
+        removeFragment(f);
+      } else {
+        break;
+      }
     }
   }
 }
@@ -450,7 +534,12 @@ export function syncFlowTimelineFromDemux(
 
   if (idx === frags.length - 1 || !details.live) {
     const flowEnd = row.start + row.duration;
-    details.totalduration = Math.max(details.totalduration || 0, flowEnd);
+    const vodCap = details.progressiveVodDuration;
+    if (vodCap > 0) {
+      details.totalduration = Math.min(vodCap, Math.max(flowEnd, row.start));
+    } else {
+      details.totalduration = Math.max(details.totalduration || 0, flowEnd);
+    }
   }
 }
 

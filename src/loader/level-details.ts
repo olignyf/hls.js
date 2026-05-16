@@ -33,6 +33,8 @@ export class LevelDetails {
   public startTimeOffset: number | null = null;
   public targetduration: number = 0;
   public totalduration: number = 0;
+  /** VoD playlist duration before flow timeline rewrite (progressive byte-range TS). */
+  public progressiveVodDuration: number = 0;
   public type: string | null = null;
   public url: string;
   public m3u8: string = '';

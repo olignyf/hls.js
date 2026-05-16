@@ -91,6 +91,8 @@ export interface BufferAppendingData {
   part: Part | null;
   chunkMeta: ChunkMetadata;
   offset?: number | undefined;
+  /** Track initSegment moov/mvex from _bufferInitSegment (not a media moof append). */
+  initSegment?: boolean;
   parent: PlaylistLevelType;
   data: Uint8Array<ArrayBuffer>;
 }

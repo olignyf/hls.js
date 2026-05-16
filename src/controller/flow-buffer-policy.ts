@@ -94,5 +94,16 @@ export function computeFlowEvictRange(
     }
   }
 
+  // Disjoint high-timestamp islands (bad progressive stitch) — drop whole ranges.
+  // FIXME unit test to see if useful
+  for (let i = 0; i < b.length; i++) {
+    if (i === activeIdx) {
+      continue;
+    }
+    if (b.start(i) > rangeEnd + 1) {
+      return { start: b.start(i), end: b.end(i) };
+    }
+  }
+
   return null;
 }

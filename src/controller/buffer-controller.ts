@@ -176,7 +176,7 @@ export default class BufferController extends Logger implements ComponentAPI {
     fragStart: number,
     remuxOffset: number | undefined,
     _cc: number,
-  ): number {
+  ): number | undefined {
     return remuxOffset !== undefined && Number.isFinite(remuxOffset)
       ? remuxOffset
       : fragStart;
@@ -832,7 +832,20 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
     eventData: BufferAppendingData,
   ) {
     const { tracks } = this;
-    const { data, type, parent, frag, part, chunkMeta, offset } = eventData;
+    const { data, type, parent, frag, part, chunkMeta, offset, initSegment } =
+      eventData;
+    if (
+      this.hls.config.progressiveTsScheduler &&
+      parent === 'main' &&
+      !initSegment &&
+      frag.sn !== 'initSegment' &&
+      offset === undefined
+    ) {
+      this.warn(
+        `progressive flow buffer: drop append sn:${frag.sn} without stitch offset`,
+      );
+      return;
+    }
     const chunkStats = chunkMeta.buffering[type];
     const { sn, cc } = frag;
     const bufferAppendingStart = self.performance.now();
@@ -914,13 +927,26 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
         if (sb) {
           if (checkTimestampOffset) {
             this.updateTimestampOffset(sb, fragStart, 0.1, type, sn, cc);
-          } else if (this.useFlowBufferPolicy()) {
+          } else if (
+            this.useFlowBufferPolicy() &&
+            !initSegment &&
+            sn !== 'initSegment'
+          ) {
             const flowOffset = this.resolveFlowTimestampOffset(
               fragStart,
               offset,
               cc,
             );
-            this.updateTimestampOffset(sb, flowOffset, 0.000001, type, sn, cc);
+            if (flowOffset !== undefined && Number.isFinite(flowOffset)) {
+              this.updateTimestampOffset(
+                sb,
+                flowOffset,
+                0.000001,
+                type,
+                sn,
+                cc,
+              );
+            }
           } else if (offset !== undefined && Number.isFinite(offset)) {
             this.updateTimestampOffset(sb, offset, 0.000001, type, sn, cc);
           }
@@ -1443,6 +1469,12 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
         return null;
       }
       return { duration: overrideDuration };
+    }
+    if (this.hls.config.progressiveTsScheduler) {
+      const vodCap = details.progressiveVodDuration;
+      if (vodCap > 0 && vodCap < 86400) {
+        return { duration: vodCap };
+      }
     }
     const mediaDuration = this.media.duration;
     const msDuration = Number.isFinite(mediaSource.duration)

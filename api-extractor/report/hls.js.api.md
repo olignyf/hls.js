@@ -429,6 +429,7 @@ export class BaseStreamController extends TaskLoop implements NetworkComponentAP
     protected set couldBacktrack(_value: boolean);
     // (undocumented)
     protected decrypter: Decrypter;
+    protected deferProgressiveHeldAppend(_data: RemuxedTrack, _frag: Fragment, _part: Part | null, _chunkMeta: ChunkMetadata, _noBacktracking?: boolean): boolean;
     // (undocumented)
     protected _doFragLoad(frag: Fragment, level: Level, targetBufferTime?: number | null, progressCallback?: FragmentLoadProgressCallback): Promise<PartsLoadedData | FragLoadedData | null>;
     // (undocumented)
@@ -676,6 +677,7 @@ export interface BufferAppendingData {
     data: Uint8Array<ArrayBuffer>;
     // (undocumented)
     frag: Fragment;
+    initSegment?: boolean;
     // (undocumented)
     offset?: number | undefined;
     // (undocumented)
@@ -720,7 +722,7 @@ export class BufferController extends Logger implements ComponentAPI {
     // (undocumented)
     hasSourceTypes(): boolean;
     // (undocumented)
-    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number;
+    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number | undefined;
     // (undocumented)
     protected shouldAllowBufferFlush(_data: BufferFlushingData): boolean;
     protected shouldEmitQuotaErrorImmediately(): boolean;
@@ -1702,7 +1704,7 @@ export class FlowBufferController extends BufferController {
     destroy(): void;
     // (undocumented)
     protected handleFlowQuotaExceeded(event: ErrorData, _type: SourceBufferName): boolean;
-    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number;
+    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number | undefined;
     // (undocumented)
     protected shouldAllowBufferFlush(data: BufferFlushingData): boolean;
     // (undocumented)
@@ -3421,6 +3423,7 @@ export class LevelDetails {
     playlistParsingError: Error | null;
     // (undocumented)
     preloadHint?: AttrList;
+    progressiveVodDuration: number;
     // (undocumented)
     PTSKnown: boolean;
     // (undocumented)
@@ -4686,6 +4689,8 @@ export class StreamController extends BaseStreamController implements NetworkCom
     get currentLevel(): number;
     // (undocumented)
     get currentProgramDateTime(): Date | null;
+    // (undocumented)
+    protected deferProgressiveHeldAppend(data: RemuxedTrack, frag: Fragment, part: Part | null, chunkMeta: ChunkMetadata, noBacktracking?: boolean): boolean;
     // (undocumented)
     protected doTick(): void;
     // (undocumented)

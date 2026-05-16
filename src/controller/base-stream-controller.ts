@@ -7,6 +7,7 @@ import {
 import { FragmentState } from './fragment-tracker';
 import {
   getLastBufferedEnd,
+  getProgressiveInitPTS,
   getSerialMseAppendTail,
   progressiveContinuousAppendOffset,
 } from './progressive-ts-scheduler';
@@ -1331,6 +1332,17 @@ export default class BaseStreamController
     return { frag, part, level };
   }
 
+  /** Progressive TS: queue append until initPTS/stitch offset is ready (stream-controller). */
+  protected deferProgressiveHeldAppend(
+    _data: RemuxedTrack,
+    _frag: Fragment,
+    _part: Part | null,
+    _chunkMeta: ChunkMetadata,
+    _noBacktracking?: boolean,
+  ): boolean {
+    return false;
+  }
+
   protected bufferFragmentData(
     data: RemuxedTrack,
     frag: Fragment,
@@ -1338,10 +1350,6 @@ export default class BaseStreamController
     chunkMeta: ChunkMetadata,
     noBacktracking?: boolean,
   ) {
-    if (this.state !== State.PARSING) {
-      return;
-    }
-
     const { data1, data2 } = data;
     let buffer = data1;
     if (data2) {
@@ -1352,25 +1360,54 @@ export default class BaseStreamController
     if (!buffer.length) {
       return;
     }
-    const offsetTimestamp = this.initPTS[frag.cc] as
-      | TimestampOffset
-      | undefined;
+
+    const { hls } = this;
     let offset: number | undefined;
-    if (this.hls.config.progressiveTsScheduler) {
+    if (hls.config.progressiveTsScheduler) {
+      const offsetTimestamp = getProgressiveInitPTS(this.initPTS);
       offset = progressiveContinuousAppendOffset(this.media, offsetTimestamp);
-      if (offsetTimestamp && offset !== undefined && isMediaFragment(frag)) {
-        const stock = -offsetTimestamp.baseTime / offsetTimestamp.timescale;
-        if (Math.abs(stock - offset) > 1) {
-          const tail = getSerialMseAppendTail(this.media);
-          this.log(
-            `progressive TS: stitch sn ${frag.sn} cc ${frag.cc} MSE tsOffset ${offset.toFixed(3)} @ serial tail ${tail?.toFixed(3)} (stock initPTS offset ${stock.toFixed(3)}; frag.startPTS ${frag.startPTS})`,
+      if (
+        offsetTimestamp &&
+        offset !== undefined &&
+        isMediaFragment(frag) &&
+        getSerialMseAppendTail(this.media) === null
+      ) {
+        const initSec = offsetTimestamp.baseTime / offsetTimestamp.timescale;
+        this.log(
+          `progressive TS: first append sn ${frag.sn} MSE tsOffset ${offset.toFixed(3)} = −initPTS ${initSec.toFixed(3)}`,
+        );
+      }
+      if (!offsetTimestamp?.timescale || offset === undefined) {
+        if (
+          this.deferProgressiveHeldAppend(
+            data,
+            frag,
+            part,
+            chunkMeta,
+            noBacktracking,
+          )
+        ) {
+          this.warn(
+            `progressive TS: hold append sn ${frag.sn} until initPTS/stitch offset is ready`,
           );
+          if (this.state === State.PARSING) {
+            this.state = State.IDLE;
+          }
+          this.tick();
         }
+        return;
       }
     } else {
+      const offsetTimestamp = this.initPTS[frag.cc] as
+        | TimestampOffset
+        | undefined;
       offset = offsetTimestamp
         ? -offsetTimestamp.baseTime / offsetTimestamp.timescale
         : undefined;
+    }
+
+    if (this.state !== State.PARSING) {
+      return;
     }
     const segment: BufferAppendingData = {
       type: data.type,

@@ -7,7 +7,8 @@ import {
 } from './flow-buffer-policy';
 import {
   getProgressiveMaxAheadSec,
-  getSerialMseAppendTail,
+  progressiveBogusIslandEvictRange,
+  progressiveContinuousAppendOffset,
 } from './progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
@@ -16,8 +17,13 @@ import type { FragmentTracker } from './fragment-tracker';
 import type Hls from '../hls';
 import type { MediaFragment, Part } from '../loader/fragment';
 import type { SourceBufferName } from '../types/buffer';
-import type { BufferFlushingData, ErrorData } from '../types/events';
+import type {
+  BufferFlushingData,
+  ErrorData,
+  InitPTSFoundData,
+} from '../types/events';
 import type { ChunkMetadata } from '../types/transmuxer';
+import type { TimestampOffset } from '../utils/timescale-conversion';
 
 type QuotaRetryContext = {
   frag: MediaFragment;
@@ -34,14 +40,31 @@ type QuotaRetryContext = {
 export default class FlowBufferController extends BufferController {
   private quotaRetry: QuotaRetryContext | null = null;
   private quotaFlushDoneTimer: number = -1;
+  private progressiveMainInitPTS?: TimestampOffset;
 
   constructor(hls: Hls, fragmentTracker: FragmentTracker) {
     super(hls, fragmentTracker);
     hls.on(Events.BUFFER_FLUSHED, this.onFlowBufferFlushed, this);
+    hls.on(Events.INIT_PTS_FOUND, this.onProgressiveInitPTSFound, this);
   }
+
+  private onProgressiveInitPTSFound = (
+    _event: Events.INIT_PTS_FOUND,
+    data: InitPTSFoundData,
+  ) => {
+    if (data.id !== 'main' || data.frag.cc !== 0) {
+      return;
+    }
+    this.progressiveMainInitPTS = {
+      baseTime: data.initPTS,
+      timescale: data.timescale,
+      trackId: 0,
+    };
+  };
 
   public override destroy(): void {
     const hls = this.getHlsInstance();
+    hls.off(Events.INIT_PTS_FOUND, this.onProgressiveInitPTSFound, this);
     hls.off(Events.BUFFER_FLUSHED, this.onFlowBufferFlushed, this);
     self.clearTimeout(this.quotaFlushDoneTimer);
     this.quotaRetry = null;
@@ -116,7 +139,10 @@ export default class FlowBufferController extends BufferController {
     const hls = this.getHlsInstance();
     const maxAhead = getProgressiveMaxAheadSec(hls.config);
     const keepBehind = Math.min(12, Math.max(2, maxAhead * 0.25));
-    const range = computeFlowEvictRange(media, ct, keepBehind, maxAhead);
+    let range = computeFlowEvictRange(media, ct, keepBehind, maxAhead);
+    if (!range && hls.config.progressiveTsScheduler) {
+      range = progressiveBogusIslandEvictRange(media);
+    }
     if (!range) {
       this.warn(
         `flow buffer: quota at ${ct.toFixed(3)} — could not compute evict range`,
@@ -143,18 +169,26 @@ export default class FlowBufferController extends BufferController {
     return true;
   }
 
-  /** Serial progressive: stitch at MSE tail, not playlist frag.start on init-only appends. */
+  /** Serial progressive: use stream-controller stitch offset when present. */
   protected override resolveFlowTimestampOffset(
     fragStart: number,
     remuxOffset: number | undefined,
     _cc: number,
-  ): number {
+  ): number | undefined {
     if (remuxOffset !== undefined && Number.isFinite(remuxOffset)) {
       return remuxOffset;
     }
-    const tail = getSerialMseAppendTail(this.getMediaElement());
-    if (tail !== null) {
-      return tail;
+    if (this.getHlsInstance().config.progressiveTsScheduler) {
+      const stitch = progressiveContinuousAppendOffset(
+        this.getMediaElement(),
+        this.progressiveMainInitPTS,
+      );
+      if (stitch !== undefined && Number.isFinite(stitch)) {
+        return stitch;
+      }
+      // Do not fall back to fragStart — that creates bogus MSE islands on the
+      // initPTS axis. Caller skips updateTimestampOffset when undefined.
+      return undefined;
     }
     return fragStart;
   }

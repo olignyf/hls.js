@@ -130,8 +130,10 @@ export default class TransmuxerInterface {
   }
 
   reset() {
-    this.frag = null;
-    this.part = null;
+    if (!this.hls.config.progressiveTsScheduler) {
+      this.frag = null;
+      this.part = null;
+    }
     if (this.workerContext) {
       const instanceNo = this.instanceNo;
       this.instanceNo = transmuxerInstanceCount++;
@@ -203,25 +205,41 @@ export default class TransmuxerInterface {
     const decryptdata = frag.decryptdata;
     const lastFrag = this.frag;
 
+    const progressiveTs = this.hls.config.progressiveTsScheduler;
     let discontinuity = lastFrag ? frag.cc !== lastFrag.cc : true;
     const trackSwitch = lastFrag ? chunkMeta.level !== lastFrag.level : true;
-    const snDiff = lastFrag ? chunkMeta.sn - lastFrag.sn : -1;
+    let snDiff = lastFrag ? chunkMeta.sn - lastFrag.sn : -1;
+    // reset() clears lastFrag after each flushed byte-range chunk; serial TS is still contiguous.
+    if (
+      progressiveTs &&
+      !lastFrag &&
+      typeof chunkMeta.sn === 'number' &&
+      chunkMeta.sn > 0
+    ) {
+      snDiff = 1;
+    }
     const partDiff = this.part ? chunkMeta.part - this.part.index : -1;
     const progressive =
       snDiff === 0 &&
       chunkMeta.id > 1 &&
       chunkMeta.id === lastFrag?.stats.chunkCount;
-    const contiguous =
+    let contiguous =
       !trackSwitch &&
       (snDiff === 1 ||
         (snDiff === 0 && (partDiff === 1 || (progressive && partDiff <= 0))));
-    const progressiveTs = this.hls.config.progressiveTsScheduler;
     if (progressiveTs && snDiff === 1 && !trackSwitch) {
       discontinuity = false;
+      contiguous = true;
       const mseTail = getSerialMseAppendTail(this.hls.media);
       if (mseTail !== null) {
         timeOffset = mseTail;
       }
+    }
+    let initSegmentChange = !(
+      lastFrag && frag.initSegment?.url === lastFrag.initSegment?.url
+    );
+    if (progressiveTs && snDiff === 1 && !trackSwitch) {
+      initSegmentChange = false;
     }
     const now = self.performance.now();
 
@@ -231,9 +249,6 @@ export default class TransmuxerInterface {
     if (part && (partDiff || !contiguous)) {
       part.stats.parsing.start = now;
     }
-    const initSegmentChange = !(
-      lastFrag && frag.initSegment?.url === lastFrag.initSegment?.url
-    );
     const state = new TransmuxState(
       discontinuity,
       contiguous,
