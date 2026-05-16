@@ -142,6 +142,53 @@ export default class BufferController extends Logger implements ComponentAPI {
     return Object.keys(this.tracks).length > 0;
   }
 
+  /** Progressive TS flow buffer policy (see FlowBufferController). */
+  protected useFlowBufferPolicy(): boolean {
+    return false;
+  }
+
+  protected shouldAllowBufferFlush(_data: BufferFlushingData): boolean {
+    return true;
+  }
+
+  protected shouldTrimFrontBuffer(): boolean {
+    return true;
+  }
+
+  protected shouldTrimBackBuffer(): boolean {
+    return true;
+  }
+
+  /** @returns true if quota was handled without BUFFER_FULL_ERROR */
+  protected handleFlowQuotaExceeded(
+    _event: ErrorData,
+    _type: SourceBufferName,
+  ): boolean {
+    return false;
+  }
+
+  protected resolveFlowTimestampOffset(
+    fragStart: number,
+    remuxOffset: number | undefined,
+    _cc: number,
+  ): number {
+    return remuxOffset !== undefined && Number.isFinite(remuxOffset)
+      ? remuxOffset
+      : fragStart;
+  }
+
+  protected getMediaElement(): HTMLMediaElement | null {
+    return this.media;
+  }
+
+  protected getLevelDetails(): LevelDetails | null {
+    return this.details;
+  }
+
+  protected getHlsInstance(): Hls {
+    return this.hls;
+  }
+
   public destroy() {
     this.unregisterListeners();
     this.details = null;
@@ -862,6 +909,13 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
         if (sb) {
           if (checkTimestampOffset) {
             this.updateTimestampOffset(sb, fragStart, 0.1, type, sn, cc);
+          } else if (this.useFlowBufferPolicy()) {
+            const flowOffset = this.resolveFlowTimestampOffset(
+              fragStart,
+              offset,
+              cc,
+            );
+            this.updateTimestampOffset(sb, flowOffset, 0.000001, type, sn, cc);
           } else if (offset !== undefined && Number.isFinite(offset)) {
             this.updateTimestampOffset(sb, offset, 0.000001, type, sn, cc);
           }
@@ -919,6 +973,11 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
           error.name == 'QuotaExceededError' ||
           `quota` in error
         ) {
+          if (this.handleFlowQuotaExceeded(event, type)) {
+            this.appendError = event;
+            this.hls.trigger(Events.ERROR, event);
+            return;
+          }
           // QuotaExceededError: http://www.w3.org/TR/html5/infrastructure.html#quotaexceedederror
           // let's stop appending any segments, and report BUFFER_FULL_ERROR error
           event.details = ErrorDetails.BUFFER_FULL_ERROR;
@@ -1002,6 +1061,12 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
     event: Events.BUFFER_FLUSHING,
     data: BufferFlushingData,
   ) {
+    if (!this.shouldAllowBufferFlush(data)) {
+      this.log(
+        `flow buffer: blocked flush [${data.startOffset}, ${data.endOffset}]`,
+      );
+      return;
+    }
     const { type, startOffset, endOffset } = data;
     if (type) {
       this.append(this.getFlushOp(type, startOffset, endOffset), type);
@@ -1227,7 +1292,11 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
         ? config.liveBackBufferLength
         : config.backBufferLength;
 
-    if (Number.isFinite(backBufferLength) && backBufferLength >= 0) {
+    if (
+      Number.isFinite(backBufferLength) &&
+      backBufferLength >= 0 &&
+      this.shouldTrimBackBuffer()
+    ) {
       const maxBackBufferLength = Math.max(backBufferLength, targetDuration);
       const targetBackBufferPosition =
         Math.floor(currentTime / targetDuration) * targetDuration -
@@ -1243,7 +1312,8 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
     const frontBufferFlushThreshold = config.frontBufferFlushThreshold;
     if (
       Number.isFinite(frontBufferFlushThreshold) &&
-      frontBufferFlushThreshold > 0
+      frontBufferFlushThreshold > 0 &&
+      this.shouldTrimFrontBuffer()
     ) {
       const frontBufferLength = Math.max(
         config.maxBufferLength,

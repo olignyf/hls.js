@@ -710,11 +710,28 @@ export class BufferController extends Logger implements ComponentAPI {
     // (undocumented)
     destroy(): void;
     // (undocumented)
+    protected getHlsInstance(): Hls;
+    // (undocumented)
+    protected getLevelDetails(): LevelDetails | null;
+    // (undocumented)
+    protected getMediaElement(): HTMLMediaElement | null;
+    // (undocumented)
+    protected handleFlowQuotaExceeded(_event: ErrorData, _type: SourceBufferName): boolean;
+    // (undocumented)
     hasSourceTypes(): boolean;
+    // (undocumented)
+    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, _cc: number): number;
+    // (undocumented)
+    protected shouldAllowBufferFlush(_data: BufferFlushingData): boolean;
+    // (undocumented)
+    protected shouldTrimBackBuffer(): boolean;
+    // (undocumented)
+    protected shouldTrimFrontBuffer(): boolean;
     // (undocumented)
     get sourceBufferTracks(): BaseTrackSet;
     // (undocumented)
     transferMedia(): AttachMediaSourceData | null;
+    protected useFlowBufferPolicy(): boolean;
 }
 
 // Warning: (ae-missing-release-tag) "BufferControllerConfig" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -1673,6 +1690,25 @@ export class FetchLoader implements Loader<LoaderContext> {
     load(context: LoaderContext, config: LoaderConfiguration, callbacks: LoaderCallbacks<LoaderContext>): void;
     // (undocumented)
     stats: LoaderStats;
+}
+
+// Warning: (ae-missing-release-tag) "FlowBufferController" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export class FlowBufferController extends BufferController {
+    constructor(hls: Hls, fragmentTracker: FragmentTracker);
+    // (undocumented)
+    protected handleFlowQuotaExceeded(event: ErrorData, type: SourceBufferName): boolean;
+    // (undocumented)
+    protected resolveFlowTimestampOffset(fragStart: number, remuxOffset: number | undefined, cc: number): number;
+    // (undocumented)
+    protected shouldAllowBufferFlush(data: BufferFlushingData): boolean;
+    // (undocumented)
+    protected shouldTrimBackBuffer(): boolean;
+    // (undocumented)
+    protected shouldTrimFrontBuffer(): boolean;
+    // (undocumented)
+    protected useFlowBufferPolicy(): boolean;
 }
 
 // Warning: (ae-missing-release-tag) "FPSController" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -4686,6 +4722,8 @@ export class StreamController extends BaseStreamController implements NetworkCom
     // (undocumented)
     protected onTickEnd(): void;
     // (undocumented)
+    protected reduceLengthAndFlushBuffer(data: ErrorData): boolean;
+    // (undocumented)
     protected registerListeners(): void;
     protected seekToStartPos(): void;
     // (undocumented)
@@ -4718,6 +4756,7 @@ export type StreamControllerConfig = {
     nextAudioTrackBufferFlushForwardOffset: number;
     progressiveTsScheduler: boolean;
     progressiveTsMaxHoleJump: number;
+    progressiveStallMinForwardBuffer: number;
 };
 
 // Warning: (ae-missing-release-tag) "SubtitleFragProcessedData" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)

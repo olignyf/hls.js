@@ -2,6 +2,7 @@ import { State } from './base-stream-controller';
 import {
   getLastBufferedEnd,
   isPlayheadPastBuffered,
+  progressiveShouldIgnoreStallReport,
   shouldJumpBufferedHole,
 } from './progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
@@ -317,8 +318,26 @@ export default class GapController extends TaskLoop {
         });
         return;
       }
-      // Report stalling after trying to fix
-      this._reportStall(bufferInfo);
+      const minFwd = config.progressiveStallMinForwardBuffer ?? 2;
+      const flowStall =
+        config.progressiveTsScheduler &&
+        progressiveShouldIgnoreStallReport(bufferInfo, minFwd);
+      if (flowStall) {
+        if (this.waiting && bufferInfo.len > 0.25) {
+          const bump = Math.min(currentTime + 0.05, bufferInfo.end - 0.05);
+          if (bump > currentTime + 1e-3) {
+            this.log(
+              `progressive TS: decoder waiting with ${bufferInfo.len.toFixed(1)}s ahead, nudge ${currentTime.toFixed(3)} → ${bump.toFixed(3)}`,
+            );
+            media.currentTime = bump;
+            this.moved = true;
+          }
+        }
+        this.stallResolved(currentTime);
+        this.hls.startLoad(-1);
+      } else {
+        this._reportStall(bufferInfo);
+      }
       if (!this.media || (!this.hls as any)) {
         return;
       }
@@ -465,7 +484,7 @@ export default class GapController extends TaskLoop {
       }
     }
     if (
-      config.progressiveTsScheduler &&
+      !config.progressiveTsScheduler &&
       shouldJumpBufferedHole(
         bufferInfo,
         currentTime,
@@ -500,6 +519,16 @@ export default class GapController extends TaskLoop {
     // we may just have to "nudge" the playlist as the browser decoding/rendering engine
     // needs to cross some sort of threshold covering all source-buffers content
     // to start playing properly.
+    if (
+      config.progressiveTsScheduler &&
+      progressiveShouldIgnoreStallReport(
+        bufferInfo,
+        config.progressiveStallMinForwardBuffer ?? 2,
+      )
+    ) {
+      return;
+    }
+
     const bufferedRanges = bufferInfo.buffered;
     const adjacentTraversal = this.adjacentTraversal(bufferInfo, currentTime);
     if (

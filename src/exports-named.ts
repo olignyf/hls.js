@@ -9,6 +9,7 @@ import CMCDController from './controller/cmcd-controller';
 import ContentSteeringController from './controller/content-steering-controller';
 import EMEController from './controller/eme-controller';
 import ErrorController from './controller/error-controller';
+import FlowBufferController from './controller/flow-buffer-controller';
 import FPSController from './controller/fps-controller';
 import SubtitleTrackController from './controller/subtitle-track-controller';
 import Hls from './hls';
@@ -27,6 +28,7 @@ export {
   BasePlaylistController,
   BaseStreamController,
   BufferController,
+  FlowBufferController,
   CapLevelController,
   CMCDController,
   ContentSteeringController,

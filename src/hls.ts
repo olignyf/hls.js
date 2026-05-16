@@ -34,6 +34,7 @@ import type CMCDController from './controller/cmcd-controller';
 import type ContentSteeringController from './controller/content-steering-controller';
 import type EMEController from './controller/eme-controller';
 import type ErrorController from './controller/error-controller';
+import type FlowBufferController from './controller/flow-buffer-controller';
 import type FPSController from './controller/fps-controller';
 import type InterstitialsController from './controller/interstitials-controller';
 import type { InterstitialsManager } from './controller/interstitials-controller';
@@ -1296,6 +1297,7 @@ export type {
   BasePlaylistController,
   BaseStreamController,
   BufferController,
+  FlowBufferController,
   CapLevelController,
   CMCDController,
   ContentSteeringController,

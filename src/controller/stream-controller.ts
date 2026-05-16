@@ -3,11 +3,15 @@ import { findFragmentByPTS } from './fragment-finders';
 import { FragmentState } from './fragment-tracker';
 import { MAX_START_GAP_JUMP } from './gap-controller';
 import {
+  clearBogusOkFragmentsAhead,
   getLastBufferedEnd,
   isPlayheadPastBuffered,
   pickNextProgressiveFragment,
+  progressiveFragNeedsMseCoverage,
   progressiveFwdBufferAnchor,
   progressiveLoadTarget,
+  shouldKeepFlowPrefetching,
+  syncFlowTimelineFromDemux,
   vodFileBytesFromDetails,
 } from './progressive-ts-scheduler';
 import TransmuxerInterface from '../demux/transmuxer-interface';
@@ -148,6 +152,20 @@ export default class StreamController
     skipSeekToStartPosition?: boolean,
   ): void {
     if (this.levels) {
+      // Progressive TS: stall recovery calls startLoad(-1); must not stopLoad() or we
+      // lose fragPrevious and reload sn:0 while MSE still holds demuxed ranges.
+      if (
+        this.hls.config.progressiveTsScheduler &&
+        this.startFragRequested &&
+        this.state !== State.STOPPED &&
+        this.state !== State.ERROR
+      ) {
+        this.setInterval(TICK_INTERVAL);
+        if (this.state === State.IDLE || this.state === State.PARSED) {
+          this.tickImmediate();
+        }
+        return;
+      }
       const { lastCurrentTime, hls } = this;
       this.stopLoad();
       this.setInterval(TICK_INTERVAL);
@@ -336,31 +354,51 @@ export default class StreamController
     const maxBufLen = this.getMaxBufferLength(levelInfo.maxBitrate);
 
     if (hls.config.progressiveTsScheduler) {
-      if (bufferLen >= maxBufLen) {
+      const ct = media?.currentTime ?? 0;
+      if (!shouldKeepFlowPrefetching(media, ct, bufferLen, maxBufLen)) {
         return;
       }
+      clearBogusOkFragmentsAhead(
+        levelDetails,
+        this.fragPrevious,
+        media,
+        (f) => this.fragmentTracker.getState(f),
+        (f) => this.fragmentTracker.removeFragment(f),
+      );
       const liveSequential = !!levelDetails.live && levelDetails.type !== 'VOD';
       const knownFileBytes = vodFileBytesFromDetails(levelDetails);
-      const ct = media?.currentTime ?? 0;
-      const pastBuffered = !!media && isPlayheadPastBuffered(media, ct, 0.5);
+      const userScrubbing = !!media?.seeking;
       const forceByteSeek =
-        !liveSequential &&
-        !!knownFileBytes &&
-        (pastBuffered || !!media?.seeking);
-      const progFrag = pickNextProgressiveFragment(
+        !liveSequential && !!knownFileBytes && userScrubbing;
+      const pickOpts = {
+        liveSequential,
+        knownFileBytes,
+        seekMediaTime:
+          forceByteSeek && media && Number.isFinite(ct) ? ct : undefined,
+        forceByteSeek,
+      };
+      let progFrag = pickNextProgressiveFragment(
         levelDetails,
         forceByteSeek ? null : this.fragPrevious,
         (f) => this.fragmentTracker.getState(f),
-        {
-          liveSequential,
-          knownFileBytes,
-          seekMediaTime:
-            !liveSequential && media && Number.isFinite(ct) ? ct : undefined,
-          forceByteSeek,
-        },
+        pickOpts,
       );
+      if (
+        progFrag &&
+        isMediaFragment(progFrag) &&
+        this.fragmentTracker.getState(progFrag) === FragmentState.OK &&
+        progressiveFragNeedsMseCoverage(progFrag, media)
+      ) {
+        this.fragmentTracker.removeFragment(progFrag);
+        progFrag = pickNextProgressiveFragment(
+          levelDetails,
+          this.fragPrevious,
+          (f) => this.fragmentTracker.getState(f),
+          { ...pickOpts, seekMediaTime: undefined, forceByteSeek: false },
+        );
+      }
       let frag: Fragment | null = progFrag;
-      if (frag && isMediaFragment(frag) && pastBuffered) {
+      if (frag && isMediaFragment(frag) && userScrubbing) {
         this.progressiveSeekSn = frag.sn;
       }
       if (frag) {
@@ -1719,6 +1757,49 @@ export default class StreamController
     return super.getLoadPosition();
   }
 
+  protected reduceLengthAndFlushBuffer(data: ErrorData): boolean {
+    if (!this.hls.config.progressiveTsScheduler) {
+      return super.reduceLengthAndFlushBuffer(data);
+    }
+    if (this.state !== State.PARSING && this.state !== State.PARSED) {
+      return false;
+    }
+    const frag = data.frag;
+    const playlistType = data.parent as PlaylistLevelType;
+    const bufferedInfo = this.getFwdBufferInfo(this.mediaBuffer, playlistType);
+    const buffered = bufferedInfo && bufferedInfo.len > 0.5;
+    if (buffered) {
+      this.reduceMaxBufferLength(bufferedInfo.len, frag?.duration || 10);
+    }
+
+    const { media } = this;
+    const ct = media?.currentTime ?? 0;
+    const lastEnd = getLastBufferedEnd(media);
+    if (media && lastEnd !== null) {
+      if (!BufferHelper.isBuffered(media, ct)) {
+        const bufInfo = BufferHelper.bufferInfo(media, ct, 0);
+        const snap = bufInfo.nextStart ?? Math.max(0, lastEnd - 0.05);
+        this.warn(
+          `progressive TS: buffer full @${ct.toFixed(3)} outside MSE, snap to ${snap.toFixed(3)} (no flush)`,
+        );
+        media.currentTime = snap;
+      }
+      this.nextLoadPosition = Math.max(this.nextLoadPosition, lastEnd);
+    } else if (frag && isMediaFragment(frag)) {
+      this.nextLoadPosition = Math.max(
+        this.nextLoadPosition,
+        frag.start + frag.duration,
+      );
+    }
+
+    if (frag) {
+      this.fragmentTracker.removeFragment(frag);
+    }
+    this.resetLoadingState();
+    this.tickImmediate();
+    return false;
+  }
+
   protected fragBufferedComplete(frag: Fragment, part: Part | null) {
     if (
       this.hls.config.progressiveTsScheduler &&
@@ -1740,6 +1821,10 @@ export default class StreamController
       const mseTail = getLastBufferedEnd(this.media);
       if (mseTail !== null) {
         this.nextLoadPosition = mseTail;
+      }
+      const details = this.getLevelDetails();
+      if (details) {
+        syncFlowTimelineFromDemux(details, frag, this.media);
       }
     }
     super.fragBufferedComplete(frag, part);

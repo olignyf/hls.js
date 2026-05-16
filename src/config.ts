@@ -7,6 +7,7 @@ import CMCDController from './controller/cmcd-controller';
 import ContentSteeringController from './controller/content-steering-controller';
 import EMEController from './controller/eme-controller';
 import ErrorController from './controller/error-controller';
+import FlowBufferController from './controller/flow-buffer-controller';
 import FPSController from './controller/fps-controller';
 import InterstitialsController from './controller/interstitials-controller';
 import { SubtitleStreamController } from './controller/subtitle-stream-controller';
@@ -238,6 +239,8 @@ export type StreamControllerConfig = {
   progressiveTsScheduler: boolean;
   /** Max gap (seconds) to jump when the next MSE range is already buffered. */
   progressiveTsMaxHoleJump: number;
+  /** With progressive TS: do not report BUFFER_STALLED when this much media is buffered ahead. */
+  progressiveStallMinForwardBuffer: number;
 };
 
 export type GapControllerConfig = {
@@ -403,6 +406,7 @@ export const hlsDefaultConfig: HlsConfig = {
   nextAudioTrackBufferFlushForwardOffset: 0.25, // used by stream-controller
   progressiveTsScheduler: false, // used by stream-controller, gap-controller
   progressiveTsMaxHoleJump: 120, // used by gap-controller (progressive TS)
+  progressiveStallMinForwardBuffer: 2, // used by gap-controller (progressive TS)
   maxBufferSize: 60 * 1000 * 1000, // used by stream-controller
   maxFragLookUpTolerance: 0.25, // used by stream-controller
   maxBufferHole: 0.1, // used by stream-controller and gap-controller
@@ -752,10 +756,19 @@ export function mergeConfig(
     }
   });
 
-  return {
+  const merged: HlsConfig = {
     ...defaultsCopy,
     ...userConfig,
   };
+
+  if (
+    merged.progressiveTsScheduler &&
+    userConfig.bufferController === undefined
+  ) {
+    merged.bufferController = FlowBufferController;
+  }
+
+  return merged;
 }
 
 function deepCpy(obj: any): any {

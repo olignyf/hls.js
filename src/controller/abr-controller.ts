@@ -553,6 +553,10 @@ class AbrController extends Logger implements AbrComponentAPI {
   }
 
   public get firstAutoLevel(): number {
+    const levels = this.hls.levels;
+    if (levels.length <= 1) {
+      return levels.length === 1 ? 0 : -1;
+    }
     const { maxAutoLevel, minAutoLevel } = this.hls;
     const bwEstimate = this.getBwEstimate();
     const maxStartDelay = this.hls.config.maxStarvationDelay;
