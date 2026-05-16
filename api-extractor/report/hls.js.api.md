@@ -4712,6 +4712,8 @@ export type StreamControllerConfig = {
     liveSyncMode?: 'edge' | 'buffered';
     startOnSegmentBoundary: boolean;
     nextAudioTrackBufferFlushForwardOffset: number;
+    progressiveTsScheduler: boolean;
+    progressiveTsMaxHoleJump: number;
 };
 
 // Warning: (ae-missing-release-tag) "SubtitleFragProcessedData" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)

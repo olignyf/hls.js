@@ -1,4 +1,5 @@
 import { State } from './base-stream-controller';
+import { shouldJumpBufferedHole } from './progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import TaskLoop from '../task-loop';
@@ -444,6 +445,23 @@ export default class GapController extends TaskLoop {
     }
 
     const levelDetails = this.hls?.latestLevelDetails;
+    if (
+      config.progressiveTsScheduler &&
+      shouldJumpBufferedHole(
+        bufferInfo,
+        currentTime,
+        config.progressiveTsMaxHoleJump,
+      )
+    ) {
+      const targetTime = bufferInfo.nextStart! + config.skipBufferHolePadding;
+      this.warn(
+        `progressive TS: jump buffered hole ${currentTime.toFixed(3)} → ${targetTime.toFixed(3)}`,
+      );
+      this.moved = true;
+      media.currentTime = targetTime;
+      return;
+    }
+
     const appended = appendedFragAtPosition(currentTime, fragmentTracker);
     if (
       appended ||

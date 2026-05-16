@@ -2,6 +2,10 @@ import BaseStreamController, { State } from './base-stream-controller';
 import { findFragmentByPTS } from './fragment-finders';
 import { FragmentState } from './fragment-tracker';
 import { MAX_START_GAP_JUMP } from './gap-controller';
+import {
+  pickNextProgressiveFragment,
+  vodFileBytesFromDetails,
+} from './progressive-ts-scheduler';
 import TransmuxerInterface from '../demux/transmuxer-interface';
 import { ErrorDetails } from '../errors';
 import { Events } from '../events';
@@ -320,6 +324,37 @@ export default class StreamController
 
     // compute max Buffer Length that we could get from this load level, based on level bitrate. don't buffer more than 60 MB and more than 30s
     const maxBufLen = this.getMaxBufferLength(levelInfo.maxBitrate);
+
+    if (hls.config.progressiveTsScheduler) {
+      if (bufferLen >= maxBufLen) {
+        return;
+      }
+      const liveSequential = !!levelDetails.live && levelDetails.type !== 'VOD';
+      const knownFileBytes = vodFileBytesFromDetails(levelDetails);
+      const seeking = !!media?.seeking;
+      const progFrag = pickNextProgressiveFragment(
+        levelDetails,
+        this.fragPrevious,
+        (f) => this.fragmentTracker.getState(f),
+        {
+          liveSequential,
+          knownFileBytes,
+          seekMediaTime:
+            !liveSequential && seeking && media ? media.currentTime : undefined,
+        },
+      );
+      let frag: Fragment | null = progFrag;
+      if (frag) {
+        frag = this.mapToInitFragWhenRequired(frag);
+      }
+      if (frag?.initSegment && !frag.initSegment.data && !this.bitrateTest) {
+        frag = frag.initSegment;
+      }
+      if (frag) {
+        this.loadFragment(frag, levelInfo, bufferInfo.end);
+      }
+      return;
+    }
 
     // Stay idle if we are still with buffer margins
     if (bufferLen >= maxBufLen) {

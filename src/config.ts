@@ -231,6 +231,13 @@ export type StreamControllerConfig = {
   liveSyncMode?: 'edge' | 'buffered';
   startOnSegmentBoundary: boolean;
   nextAudioTrackBufferFlushForwardOffset: number;
+  /**
+   * Sequential TS / byte-range mode: load by SN and demuxed timeline; VoD seek uses
+   * byte length from the playlist when known. Live: append-only (no seek mapping).
+   */
+  progressiveTsScheduler: boolean;
+  /** Max gap (seconds) to jump when the next MSE range is already buffered. */
+  progressiveTsMaxHoleJump: number;
 };
 
 export type GapControllerConfig = {
@@ -394,6 +401,8 @@ export const hlsDefaultConfig: HlsConfig = {
   frontBufferFlushThreshold: Infinity,
   startOnSegmentBoundary: false, // used by stream-controller
   nextAudioTrackBufferFlushForwardOffset: 0.25, // used by stream-controller
+  progressiveTsScheduler: false, // used by stream-controller, gap-controller
+  progressiveTsMaxHoleJump: 120, // used by gap-controller (progressive TS)
   maxBufferSize: 60 * 1000 * 1000, // used by stream-controller
   maxFragLookUpTolerance: 0.25, // used by stream-controller
   maxBufferHole: 0.1, // used by stream-controller and gap-controller
