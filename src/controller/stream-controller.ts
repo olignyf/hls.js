@@ -252,8 +252,20 @@ export default class StreamController
       return;
     }
 
-    const level = this.buffering ? hls.nextLoadLevel : hls.loadLevel;
-    if (!levels?.[level]) {
+    if (!levels?.length) {
+      return;
+    }
+    const nLevels = levels.length;
+    const levelRaw = this.buffering ? hls.nextLoadLevel : hls.loadLevel;
+    let level = levelRaw;
+    if (level < 0 || level >= nLevels || !levels[level]) {
+      const fb = hls.firstAutoLevel;
+      level = Math.max(
+        0,
+        Math.min(nLevels - 1, fb >= 0 && fb < nLevels ? fb : 0),
+      );
+    }
+    if (!levels[level]) {
       return;
     }
 
@@ -323,30 +335,81 @@ export default class StreamController
     // `getFragmentAtPosition` clears to null, idle never pulls sn+1 → real stall (~0 buffer ahead).
     // Sub-frame fudge + clamp advances the lookup into the following segment timeline.
     const vodPrefetchBumpSec =
-      levelDetails.live || this.backtrackFragment
+      (levelDetails.live && levelDetails.type !== 'VOD') ||
+      this.backtrackFragment
         ? 0
         : Math.min(4e-2, Math.max(levelDetails.edge - bufferInfo.end, 0));
-    const bufferProbeVoD = levelDetails.live
-      ? bufferInfo.end
-      : Math.min(
-          levelDetails.edge,
-          Math.max(bufferInfo.end, this.nextLoadPosition),
-        );
+    // Never widen the VoD PTS probe with `nextLoadPosition`: it is set at `_doFragLoad` start and can
+    // race far ahead (e.g. ~700s) after aborted/failed byte-range loads while MSE buffer stays near ~28s,
+    // which makes `getNextFragment` pick the wrong segment and stalls playback.
     const targetBufferTime = this.backtrackFragment
       ? this.backtrackFragment.start
       : vodPrefetchBumpSec > 0
-        ? Math.min(levelDetails.edge, bufferProbeVoD + vodPrefetchBumpSec)
-        : bufferProbeVoD;
-    let frag = this.getNextFragment(targetBufferTime, levelDetails);
-    if (!frag && !levelDetails.live && this.fragPrevious !== null) {
+        ? Math.min(levelDetails.edge, bufferInfo.end + vodPrefetchBumpSec)
+        : bufferInfo.end;
+    // Playlist-type:VOD can coexist with live=true until ENDLIST is processed (or after buggy reloads).
+    // Byte-range chunked TS relies on advancing sn while the picker still returns an OK fragment — gate on type too.
+    const vodIdleAdvancesSn = !levelDetails.live || levelDetails.type === 'VOD';
+    // Tracker can show sn+1 as OK without MSE coverage (post-reload merge, discontinuity races).
+    // getFragmentAtPosition then returns null → idle never starts a fetch → stall at first EXTINF tail.
+    if (
+      vodIdleAdvancesSn &&
+      this.fragPrevious &&
+      isMediaFragment(this.fragPrevious)
+    ) {
       const pv = this.fragPrevious;
-      if (pv.sn < levelDetails.endSN) {
+      const pvSn = typeof pv.sn === 'number' ? pv.sn : Number(pv.sn);
+      if (Number.isFinite(pvSn) && pvSn < levelDetails.endSN) {
+        const nx = levelDetails.fragments[pvSn + 1 - levelDetails.startSN];
+        if (nx && isMediaFragment(nx)) {
+          const tol = Math.max(this.config.maxFragLookUpTolerance, 0.05);
+          const nxTail = nx.start + nx.duration;
+          const bogusOkAhead =
+            Number.isFinite(nx.start) &&
+            Number.isFinite(nx.duration) &&
+            bufferInfo.len < Math.min(maxBufLen * 0.08, 3) &&
+            (bufferInfo.end < nx.start - tol ||
+              bufferInfo.end < nxTail - Math.min(nx.duration * 0.15, 2));
+          if (
+            this.fragmentTracker.getState(nx) === FragmentState.OK &&
+            bogusOkAhead
+          ) {
+            this.fragmentTracker.removeFragment(nx);
+          }
+        }
+      }
+    }
+    let frag = this.getNextFragment(targetBufferTime, levelDetails);
+    if (!frag && vodIdleAdvancesSn && this.fragPrevious !== null) {
+      const pv = this.fragPrevious;
+      const pvSn = typeof pv.sn === 'number' ? pv.sn : Number(pv.sn);
+      if (Number.isFinite(pvSn) && pvSn < levelDetails.endSN) {
         const candidateNext =
-          levelDetails.fragments[pv.sn + 1 - levelDetails.startSN];
+          levelDetails.fragments[pvSn + 1 - levelDetails.startSN];
         if (candidateNext && isMediaFragment(candidateNext)) {
           const nxSt = this.fragmentTracker.getState(candidateNext);
           if (nxSt !== FragmentState.OK && nxSt !== FragmentState.APPENDING) {
             frag = candidateNext;
+          }
+        }
+      }
+    }
+    // VoD / multi-range TS: picker can still resolve to an already-buffered fragment while sn+1 is
+    // NOT_LOADED. loadFragment() no-ops on FragmentState.OK (clearTrackerIfNeeded only), so IDLE spins
+    // until the buffer drains → bufferStalledError at the first EXTINF tail (~28 s).
+    if (
+      frag &&
+      vodIdleAdvancesSn &&
+      isMediaFragment(frag) &&
+      this.fragmentTracker.getState(frag) === FragmentState.OK
+    ) {
+      const curSn = typeof frag.sn === 'number' ? frag.sn : Number(frag.sn);
+      if (Number.isFinite(curSn) && curSn < levelDetails.endSN) {
+        const nx = levelDetails.fragments[curSn + 1 - levelDetails.startSN];
+        if (nx && isMediaFragment(nx)) {
+          const nxSt = this.fragmentTracker.getState(nx);
+          if (nxSt !== FragmentState.OK && nxSt !== FragmentState.APPENDING) {
+            frag = nx;
           }
         }
       }

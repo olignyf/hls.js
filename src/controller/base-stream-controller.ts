@@ -81,6 +81,8 @@ let __loggedHlsPlayerPatch_nextLPClean = false;
 /** Mux timeline shorter than EXTINF vs buffer (first branch); vs stale NLP (second). */
 let __loggedHlsPlayerPatch_isLoopLoadingMux = false;
 let __loggedHlsPlayerPatch_isLoopLoadingStale = false;
+/** NLP raced to playlist tail while forward buffer from playhead is still short (holes / discontinuities). */
+let __loggedHlsPlayerPatch_nextLPBufAlign = false;
 
 export const State = {
   STOPPED: 'STOPPED',
@@ -898,6 +900,39 @@ export default class BaseStreamController
           );
         }
         this.nextLoadPosition = tail;
+      }
+      const ct = this.media?.currentTime;
+      if (
+        media &&
+        Number.isFinite(ct) &&
+        Number.isFinite(this.nextLoadPosition)
+      ) {
+        const fwd = this.getFwdBufferInfoAtPos(
+          media,
+          ct as number,
+          this.playlistType,
+          this.config.maxBufferHole,
+        );
+        if (
+          fwd &&
+          Number.isFinite(fwd.end) &&
+          this.nextLoadPosition > fwd.end + 20
+        ) {
+          if (!__loggedHlsPlayerPatch_nextLPBufAlign) {
+            __loggedHlsPlayerPatch_nextLPBufAlign = true;
+            console.warn(
+              '[hls-player-patch] Clamped nextLoadPosition ahead of forward buffer (playhead)',
+              Number(this.nextLoadPosition).toFixed(3),
+              '→',
+              Number(fwd.end).toFixed(3),
+              'ct:',
+              Number(ct).toFixed(3),
+              'sn:',
+              frag.sn,
+            );
+          }
+          this.nextLoadPosition = fwd.end;
+        }
       }
     }
 
@@ -1976,15 +2011,23 @@ export default class BaseStreamController
 
   protected getLoadPosition(): number {
     const { media } = this;
-    // if we have not yet loaded any fragment, start loading from start position
-    let pos = 0;
-    if (this.hls?.hasEnoughToStart && media) {
-      pos = media.currentTime;
-    } else if (this.nextLoadPosition >= 0) {
-      pos = this.nextLoadPosition;
+    // Prefer element time whenever playback has entered buffered media. `_hasEnoughToStart` can stay
+    // false briefly (or after edge races); falling back to `nextLoadPosition` then uses an inflated load
+    // cursor (set at `_doFragLoad` before append) and breaks buffer-length / fragment scheduling.
+    if (media && Number.isFinite(media.currentTime)) {
+      const ct = media.currentTime;
+      const useCurrentTime =
+        !!this.hls?.hasEnoughToStart ||
+        (!!BufferHelper.getBuffered(media).length &&
+          BufferHelper.isBuffered(media, ct));
+      if (useCurrentTime) {
+        return ct;
+      }
     }
-
-    return pos;
+    if (this.nextLoadPosition >= 0) {
+      return this.nextLoadPosition;
+    }
+    return 0;
   }
 
   private handleFragLoadAborted(frag: Fragment, part: Part | null | undefined) {

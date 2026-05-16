@@ -165,7 +165,14 @@ export function mediaFragmentsAreEqual(
   frag: Fragment,
   mediaFragment: MediaFragment | null | undefined,
 ): boolean {
-  return frag.sn === mediaFragment?.sn && frag.level === mediaFragment.level;
+  if (frag.level !== mediaFragment?.level) {
+    return false;
+  }
+  // MediaFragment narrows sn to number; init segments only appear as plain Fragment here.
+  if (frag.sn === 'initSegment') {
+    return false;
+  }
+  return Number(frag.sn) === Number(mediaFragment.sn);
 }
 
 export function fragmentsAreEqual(
