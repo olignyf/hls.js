@@ -843,6 +843,53 @@ export default class BaseStreamController
     return !frag || !fragmentsAreEqual(frag, fragCurrent);
   }
 
+  /**
+   * Pull `nextLoadPosition` back when it has raced to a remote playlist PTS while playback is still earlier.
+   * Otherwise IDLE scheduling / probes show `fwdBufLen` tiny with `nextLoadPosition` at the playlist tail (~stall and
+   * buffer holes across EXT-X-DISCONTINUITY byte-range joins, e.g. ~90s→~100s while NLP ~1600).
+   */
+  protected clampNextLoadPositionFromPlayheadFwdBuffer(
+    thresholdSec: number = 20,
+  ): void {
+    const bufferOutput =
+      this.getBufferOutput() ?? this.mediaBuffer ?? this.media;
+    const { media } = this;
+    if (
+      !bufferOutput ||
+      !media ||
+      !Number.isFinite(media.currentTime) ||
+      !Number.isFinite(this.nextLoadPosition) ||
+      this.nextLoadPosition < 0
+    ) {
+      return;
+    }
+    const ct = media.currentTime;
+    const fwd = this.getFwdBufferInfoAtPos(
+      bufferOutput,
+      ct,
+      this.playlistType,
+      this.config.maxBufferHole,
+    );
+    if (
+      fwd &&
+      Number.isFinite(fwd.end) &&
+      this.nextLoadPosition > fwd.end + thresholdSec
+    ) {
+      if (!__loggedHlsPlayerPatch_nextLPBufAlign) {
+        __loggedHlsPlayerPatch_nextLPBufAlign = true;
+        console.warn(
+          '[hls-player-patch] Clamped nextLoadPosition ahead of forward buffer (playhead)',
+          Number(this.nextLoadPosition).toFixed(3),
+          '→',
+          Number(fwd.end).toFixed(3),
+          'ct:',
+          Number(ct).toFixed(3),
+        );
+      }
+      this.nextLoadPosition = fwd.end;
+    }
+  }
+
   protected fragBufferedComplete(frag: Fragment, part: Part | null) {
     const media = this.mediaBuffer ? this.mediaBuffer : this.media;
     this.log(
@@ -901,39 +948,7 @@ export default class BaseStreamController
         }
         this.nextLoadPosition = tail;
       }
-      const ct = this.media?.currentTime;
-      if (
-        media &&
-        Number.isFinite(ct) &&
-        Number.isFinite(this.nextLoadPosition)
-      ) {
-        const fwd = this.getFwdBufferInfoAtPos(
-          media,
-          ct as number,
-          this.playlistType,
-          this.config.maxBufferHole,
-        );
-        if (
-          fwd &&
-          Number.isFinite(fwd.end) &&
-          this.nextLoadPosition > fwd.end + 20
-        ) {
-          if (!__loggedHlsPlayerPatch_nextLPBufAlign) {
-            __loggedHlsPlayerPatch_nextLPBufAlign = true;
-            console.warn(
-              '[hls-player-patch] Clamped nextLoadPosition ahead of forward buffer (playhead)',
-              Number(this.nextLoadPosition).toFixed(3),
-              '→',
-              Number(fwd.end).toFixed(3),
-              'ct:',
-              Number(ct).toFixed(3),
-              'sn:',
-              frag.sn,
-            );
-          }
-          this.nextLoadPosition = fwd.end;
-        }
-      }
+      this.clampNextLoadPositionFromPlayheadFwdBuffer();
     }
 
     this.state = State.IDLE;

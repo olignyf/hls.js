@@ -255,6 +255,8 @@ export default class StreamController
     if (!levels?.length) {
       return;
     }
+    this.clampNextLoadPositionFromPlayheadFwdBuffer();
+
     const nLevels = levels.length;
     const levelRaw = this.buffering ? hls.nextLoadLevel : hls.loadLevel;
     let level = levelRaw;

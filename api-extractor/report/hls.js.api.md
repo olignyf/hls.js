@@ -418,6 +418,7 @@ export class BaseStreamController extends TaskLoop implements NetworkComponentAP
     protected checkLiveUpdate(details: LevelDetails): void;
     // (undocumented)
     protected checkRetryDate(): void;
+    protected clampNextLoadPositionFromPlayheadFwdBuffer(thresholdSec?: number): void;
     protected cleanupBackBuffer(): void;
     // (undocumented)
     protected clearTrackerIfNeeded(frag: Fragment): void;
