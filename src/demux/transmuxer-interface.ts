@@ -213,11 +213,13 @@ export default class TransmuxerInterface {
     const trackSwitch = lastFrag ? chunkMeta.level !== lastFrag.level : true;
     let snDiff = lastFrag ? chunkMeta.sn - lastFrag.sn : -1;
     // reset() clears lastFrag after each flushed byte-range chunk; serial TS is still contiguous.
+    const gatheringBack = !!this.hls.progressiveSeekGatheringBack;
     if (
       progressiveTs &&
       !lastFrag &&
       typeof chunkMeta.sn === 'number' &&
-      chunkMeta.sn > 0
+      chunkMeta.sn > 0 &&
+      !gatheringBack
     ) {
       snDiff = 1;
     }
@@ -238,10 +240,32 @@ export default class TransmuxerInterface {
         timeOffset = mseTail;
       }
     }
+    // VoD byte-range scrub: same TS timeline/initPTS as sn 0; cc per fragment is not a real discontinuity.
+    const progressiveSeekJump =
+      progressiveTs &&
+      !!lastFrag &&
+      !trackSwitch &&
+      snDiff !== 0 &&
+      snDiff !== 1;
+    const progressiveSeekGather =
+      progressiveTs &&
+      gatheringBack &&
+      (!lastFrag || (snDiff < 0 && !trackSwitch));
+    if (progressiveSeekJump || progressiveSeekGather) {
+      discontinuity = false;
+      // Must be false: remuxer uses frag.start as timeline anchor, not MSE tail (~28s).
+      contiguous = false;
+      accurateTimeOffset = false;
+      timeOffset = part ? part.start : frag.start;
+    }
     let initSegmentChange = !(
       lastFrag && frag.initSegment?.url === lastFrag.initSegment?.url
     );
-    if (progressiveTs && snDiff === 1 && !trackSwitch) {
+    if (
+      progressiveTs &&
+      (snDiff === 1 || progressiveSeekJump || progressiveSeekGather) &&
+      !trackSwitch
+    ) {
       initSegmentChange = false;
     }
     const now = self.performance.now();

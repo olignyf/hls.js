@@ -115,6 +115,8 @@ export interface BufferFlushingData {
   endOffset: number;
   endOffsetSubtitles?: number;
   type: SourceBufferName | null;
+  /** Progressive TS scrub: allow full MSE wipe (flow buffer policy). */
+  progressiveScrubFlush?: boolean;
 }
 
 export interface BufferFlushedData {

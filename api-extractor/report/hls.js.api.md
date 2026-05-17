@@ -794,6 +794,7 @@ export interface BufferFlushingData {
     endOffset: number;
     // (undocumented)
     endOffsetSubtitles?: number;
+    progressiveScrubFlush?: boolean;
     // (undocumented)
     startOffset: number;
     // (undocumented)
@@ -2240,6 +2241,7 @@ class Hls implements HlsEventEmitter {
     get pathways(): string[];
     pauseBuffering(): void;
     get playingDate(): Date | null;
+    get progressiveSeekGatheringBack(): boolean;
     recoverMediaError(): void;
     // (undocumented)
     removeAllListeners<E extends keyof HlsListeners>(event?: E | undefined): void;
@@ -4732,6 +4734,7 @@ export class StreamController extends BaseStreamController implements NetworkCom
     protected onMediaDetaching(event: Events.MEDIA_DETACHING, data: MediaDetachingData): void;
     // (undocumented)
     protected onTickEnd(): void;
+    get progressiveSeekGatheringBack(): boolean;
     // (undocumented)
     protected reduceLengthAndFlushBuffer(data: ErrorData): boolean;
     // (undocumented)

@@ -65,6 +65,38 @@ export function findFragmentIndexByTimeline(
   return lo;
 }
 
+/** True when every fragment has monotonic byte-range starts (safe for binary search). */
+export function mediaFragmentsHaveByteMap(fragments: MediaFragment[]): boolean {
+  if (fragments.length < 2) {
+    return false;
+  }
+  let prev = fragments[0].byteRangeStartOffset;
+  if (typeof prev !== 'number' || !Number.isFinite(prev) || prev < 0) {
+    return false;
+  }
+  for (let i = 1; i < fragments.length; i++) {
+    const start = fragments[i].byteRangeStartOffset;
+    if (typeof start !== 'number' || !Number.isFinite(start) || start <= prev) {
+      return false;
+    }
+    prev = start;
+  }
+  return true;
+}
+
+/** First chunk to load for a playlist-time scrub (include prior chunk for keyframe). */
+export function pickProgressiveSeekBootstrapFragment(
+  fragments: MediaFragment[],
+  seekTime: number,
+): MediaFragment | null {
+  if (!fragments.length || !Number.isFinite(seekTime)) {
+    return null;
+  }
+  const tIdx = findFragmentIndexByTimeline(fragments, seekTime);
+  const loadIdx = Math.max(0, tIdx > 0 ? tIdx - 1 : tIdx);
+  return fragments[loadIdx] ?? null;
+}
+
 export function findFragmentIndexByByte(
   fragments: MediaFragment[],
   bytePos: number,
@@ -185,7 +217,16 @@ export function progressiveShouldLoadNextFragment(
   fragPrevious: MediaFragment | null,
   initPTS?: Array<TimestampOffset | undefined>,
   lastBufferedFrag?: MediaFragment | null,
+  pendingSeekMediaTime?: number | null,
 ): boolean {
+  if (
+    pendingSeekMediaTime != null &&
+    Number.isFinite(pendingSeekMediaTime) &&
+    media &&
+    !BufferHelper.isBuffered(media, pendingSeekMediaTime)
+  ) {
+    return true;
+  }
   const hasInitPTS = !!getProgressiveInitPTS(initPTS ?? [])?.timescale;
   if (!hasInitPTS) {
     // initPTS is discovered by transmuxing the first byte-range chunk — do not
@@ -311,6 +352,10 @@ export function progressiveFwdBufferAnchor(
   ) {
     return currentTime;
   }
+  // Forward scrub past all MSE — schedule from playhead, not stale tail at ~0–30s.
+  if (isPlayheadPastBuffered(media, currentTime)) {
+    return Number.isFinite(currentTime) ? Math.max(0, currentTime) : 0;
+  }
   const hole = getPlayheadBufferedHole(media, currentTime);
   if (hole?.prevEnd != null) {
     return Math.max(0, hole.prevEnd - 1e-3);
@@ -342,6 +387,12 @@ export type PickNextProgressiveOpts = {
   knownFileBytes?: number | null;
   /** User scrub only: map `seekMediaTime` to bytes. Never set for automatic playback. */
   forceByteSeek?: boolean;
+  /** First seek chunk only; after that chain serially from `fragPrevious`. */
+  seekBootstrap?: boolean;
+  /** Load this SN (gathering bytes backward until a keyframe). */
+  forceLoadSn?: number | null;
+  /** Locked bootstrap SN from scrub prepare (avoids end-of-file re-pick). */
+  seekBootstrapSn?: number | null;
 };
 
 /** Highest SN already loaded/appended — for serial resume when `fragPrevious` was cleared. */
@@ -376,20 +427,60 @@ export function pickNextProgressiveFragment(
 
   let startIdx = 0;
 
+  if (opts.forceLoadSn != null) {
+    const forced = frags[opts.forceLoadSn - details.startSN];
+    if (forced && isMediaFragment(forced)) {
+      return forced;
+    }
+  }
+
   const useByteSeek =
     !opts.liveSequential &&
     opts.forceByteSeek &&
+    opts.seekBootstrap !== false &&
     opts.seekMediaTime !== undefined &&
     !!opts.knownFileBytes &&
     !!details.totalduration;
 
   if (useByteSeek) {
-    const ratio = Math.max(
-      0,
-      Math.min(1, opts.seekMediaTime! / details.totalduration),
-    );
-    const bytePos = Math.floor(ratio * opts.knownFileBytes!);
-    startIdx = findFragmentIndexByByte(frags, bytePos);
+    const time = opts.seekMediaTime!;
+    if (opts.seekBootstrapSn != null) {
+      const locked = frags[opts.seekBootstrapSn - details.startSN];
+      if (locked && isMediaFragment(locked)) {
+        return locked;
+      }
+    }
+    const mediaFrags: MediaFragment[] = [];
+    for (let i = 0; i < frags.length; i++) {
+      const row = frags[i];
+      if (isMediaFragment(row)) {
+        mediaFrags.push(row);
+      }
+    }
+    const list = mediaFrags.length ? mediaFrags : (frags as MediaFragment[]);
+    // Virtual playlist EXTINF ∝ bytes — timeline is the seek index. Byte binary
+    // search is only used when offsets are fully monotonic and agree with time.
+    let target = pickProgressiveSeekBootstrapFragment(list, time);
+    if (
+      !target &&
+      mediaFragmentsHaveByteMap(list) &&
+      details.totalduration &&
+      opts.knownFileBytes
+    ) {
+      const ratio = Math.max(0, Math.min(1, time / details.totalduration));
+      const bytePos = Math.floor(ratio * opts.knownFileBytes);
+      const bIdx = findFragmentIndexByByte(list, bytePos);
+      const tIdx = findFragmentIndexByTimeline(list, time);
+      if (Math.abs(bIdx - tIdx) <= 2) {
+        const loadIdx = Math.max(0, bIdx > 0 ? bIdx - 1 : bIdx);
+        target = list[loadIdx] ?? null;
+      }
+    }
+    if (target) {
+      return target;
+    }
+    const tIdx = findFragmentIndexByTimeline(list, time);
+    startIdx = Math.max(0, tIdx > 0 ? tIdx - 1 : tIdx);
   } else if (fragPrevious) {
     startIdx = fragPrevious.sn - details.startSN + 1;
   } else {
@@ -583,4 +674,16 @@ export function warnProgressiveTsDiag(
     return;
   }
   console.warn('[hls-player-patch]', message, ...detail);
+}
+
+/** Seek/scrub tracing (`hlsDiag=0` does not disable — use for seek regressions). */
+export function logProgressiveSeek(
+  config: Pick<HlsConfig, 'progressiveTsScheduler'> | undefined,
+  phase: string,
+  detail: Record<string, unknown>,
+): void {
+  if (!config?.progressiveTsScheduler) {
+    return;
+  }
+  console.warn('[hls-player-patch][seek]', phase, detail);
 }

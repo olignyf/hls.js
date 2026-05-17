@@ -543,6 +543,11 @@ export default class Hls implements HlsEventEmitter {
     return this.streamController.hasEnoughToStart;
   }
 
+  /** Progressive TS: loading earlier byte-range chunks to find a keyframe after scrub. */
+  get progressiveSeekGatheringBack(): boolean {
+    return this.streamController.progressiveSeekGatheringBack;
+  }
+
   /**
    * Get the startPosition set on startLoad(position) or on autostart with config.startPosition
    */

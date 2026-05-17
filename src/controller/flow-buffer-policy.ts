@@ -8,6 +8,9 @@ export function flowAllowsBufferFlush(
   data: BufferFlushingData,
   _media: Bufferable | null,
 ): boolean {
+  if (data.progressiveScrubFlush) {
+    return true;
+  }
   const { startOffset, endOffset } = data;
   if (startOffset <= 0 && !Number.isFinite(endOffset)) {
     return false;
