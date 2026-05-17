@@ -462,15 +462,17 @@ export function pickNextProgressiveFragment(
     // search is only used when offsets are fully monotonic and agree with time.
     let target = pickProgressiveSeekBootstrapFragment(list, time);
     if (
-      !target &&
+      target == null &&
       mediaFragmentsHaveByteMap(list) &&
       details.totalduration &&
       opts.knownFileBytes
     ) {
+      // Byte map is available, so we can use it to find the closest fragment to the seek time
       const ratio = Math.max(0, Math.min(1, time / details.totalduration));
       const bytePos = Math.floor(ratio * opts.knownFileBytes);
       const bIdx = findFragmentIndexByByte(list, bytePos);
       const tIdx = findFragmentIndexByTimeline(list, time);
+      // If the byte index and timeline index are close enough, we can use the byte index to find the closest fragment
       if (Math.abs(bIdx - tIdx) <= 2) {
         const loadIdx = Math.max(0, bIdx > 0 ? bIdx - 1 : bIdx);
         target = list[loadIdx] ?? null;
@@ -479,6 +481,8 @@ export function pickNextProgressiveFragment(
     if (target) {
       return target;
     }
+    // fallback to timeline index
+    console.warn('fallback to timeline index seek');
     const tIdx = findFragmentIndexByTimeline(list, time);
     startIdx = Math.max(0, tIdx > 0 ? tIdx - 1 : tIdx);
   } else if (fragPrevious) {
