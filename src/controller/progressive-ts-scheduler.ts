@@ -572,3 +572,15 @@ export function shouldJumpBufferedHole(
   const gap = nextStart - currentTime;
   return gap > 0 && gap <= maxJumpSec && bufferInfo.len < 2;
 }
+
+/** Visible console diagnostics for progressive TS byte-range mode (`hlsDiag` / devtools). */
+export function warnProgressiveTsDiag(
+  config: Pick<HlsConfig, 'progressiveTsScheduler'> | undefined,
+  message: string,
+  ...detail: unknown[]
+): void {
+  if (!config?.progressiveTsScheduler) {
+    return;
+  }
+  console.warn('[hls-player-patch]', message, ...detail);
+}

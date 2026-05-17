@@ -5,7 +5,10 @@ import {
   loadWorker,
   removeWorkerFromStore as removeWorkerClient,
 } from './inject-worker';
-import { getSerialMseAppendTail } from '../controller/progressive-ts-scheduler';
+import {
+  getSerialMseAppendTail,
+  warnProgressiveTsDiag,
+} from '../controller/progressive-ts-scheduler';
 import Transmuxer, {
   isPromise,
   TransmuxConfig,
@@ -358,6 +361,11 @@ export default class TransmuxerInterface {
     if (!this.hls) {
       return;
     }
+    warnProgressiveTsDiag(
+      this.hls.config,
+      `transmux error: ${reason}`,
+      error.message,
+    );
     this.error = error;
     this.hls.trigger(Events.ERROR, {
       type: ErrorTypes.MEDIA_ERROR,

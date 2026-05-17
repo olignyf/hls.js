@@ -1,6 +1,7 @@
 import AACDemuxer from './audio/aacdemuxer';
 import { AC3Demuxer } from './audio/ac3-demuxer';
 import MP3Demuxer from './audio/mp3demuxer';
+import { warnProgressiveTsDiag } from '../controller/progressive-ts-scheduler';
 import Decrypter from '../crypt/decrypter';
 import MP4Demuxer from '../demux/mp4demuxer';
 import TSDemuxer from '../demux/tsdemuxer';
@@ -172,6 +173,10 @@ export default class Transmuxer {
       const error = this.configureTransmuxer(uintData);
       if (error) {
         this.logger.warn(`[transmuxer] ${error.message}`);
+        warnProgressiveTsDiag(
+          this.config,
+          `TS transmux/decode error: ${error.message}`,
+        );
         this.observer.emit(Events.ERROR, Events.ERROR, {
           type: ErrorTypes.MEDIA_ERROR,
           details: ErrorDetails.FRAG_PARSING_ERROR,

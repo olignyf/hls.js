@@ -15,6 +15,7 @@ import * as MpegAudio from './audio/mpegaudio';
 import SampleAesDecrypter from './sample-aes';
 import AvcVideoParser from './video/avc-video-parser';
 import HevcVideoParser from './video/hevc-video-parser';
+import { warnProgressiveTsDiag } from '../controller/progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import {
@@ -186,7 +187,7 @@ class TSDemuxer implements Demuxer {
     this._videoTrack.duration = trackDuration;
     this.videoIntegrityChecker =
       this.config.handleMpegTsVideoIntegrityErrors === 'skip'
-        ? new PacketsIntegrityChecker(this.logger)
+        ? new PacketsIntegrityChecker(this.logger, this.config)
         : null;
     this._audioTrack = TSDemuxer.createTrack(
       'audio',
@@ -280,11 +281,25 @@ class TSDemuxer implements Demuxer {
 
     // loop through TS packets
     let tsPacketErrors = 0;
+    let tsDiscontinuityWarned = false;
     for (let start = syncOffset; start < len; start += PACKET_LENGTH) {
       if (data[start] === 0x47) {
         const stt = !!(data[start + 1] & 0x40);
         const pid = parsePID(data, start);
         const atf = (data[start + 3] & 0x30) >> 4;
+
+        if (
+          !tsDiscontinuityWarned &&
+          atf > 1 &&
+          data[start + 4] > 0 &&
+          (data[start + 5] & 0x80) !== 0
+        ) {
+          tsDiscontinuityWarned = true;
+          warnProgressiveTsDiag(
+            this.config,
+            `MPEG-TS discontinuity indicator in payload PID=${pid}`,
+          );
+        }
 
         // if an adaption field is present, its length is specified by the fifth byte of the TS packet header.
         let offset: number;
@@ -450,6 +465,7 @@ class TSDemuxer implements Demuxer {
         ),
         undefined,
         this.logger,
+        this.config,
       );
     }
 
@@ -675,6 +691,7 @@ class TSDemuxer implements Demuxer {
         new Error(reason),
         recoverable,
         this.logger,
+        this.config,
       );
       if (!recoverable) {
         return;
@@ -1025,6 +1042,7 @@ function parsePMT(
           new Error('Unsupported EC-3 in M2TS found'),
           undefined,
           logger,
+          config,
         );
         return result;
 
@@ -1041,6 +1059,7 @@ function parsePMT(
             new Error('Unsupported HEVC in M2TS found'),
             undefined,
             logger,
+            config,
           );
           return result;
         }
@@ -1062,8 +1081,10 @@ function emitParsingError(
   error: Error,
   levelRetry: boolean | undefined,
   logger: ILogger,
+  config?: HlsConfig,
 ) {
   logger.warn(`parsing error: ${error.message}`);
+  warnProgressiveTsDiag(config, `TS parse/decode error: ${error.message}`);
   observer.emit(Events.ERROR, Events.ERROR, {
     type: ErrorTypes.MEDIA_ERROR,
     details: ErrorDetails.FRAG_PARSING_ERROR,
@@ -1183,13 +1204,15 @@ function parsePES(stream: ElementaryStreamData, logger: ILogger): PES | null {
 // See FFMpeg for reference: https://github.com/FFmpeg/FFmpeg/blob/e4c8e80a2efee275f2a10fcf0424c9fc1d86e309/libavformat/mpegts.c#L2811-L2834
 class PacketsIntegrityChecker {
   private readonly logger: ILogger;
+  private readonly config: HlsConfig;
 
   private pid: number = 0;
   private lastContinuityCounter = -1;
   private integrityState: 'ok' | 'tei-bit' | 'cc-failed' = 'ok';
 
-  constructor(logger: ILogger) {
+  constructor(logger: ILogger, config: HlsConfig) {
     this.logger = logger;
+    this.config = config;
   }
 
   public get isCorrupted(): boolean {
@@ -1228,6 +1251,10 @@ class PacketsIntegrityChecker {
       hasAdaptation && data[4] != 0 && (data[5] & 0x80) != 0;
 
     if (isDiscontinuity) {
+      warnProgressiveTsDiag(
+        this.config,
+        `MPEG-TS discontinuity indicator in payload PID=${pid}`,
+      );
       return;
     }
     if (lastContinuityCounter < 0) {
@@ -1238,15 +1265,17 @@ class PacketsIntegrityChecker {
       ? (lastContinuityCounter + 1) & 0x0f
       : lastContinuityCounter;
     if (continuityCounter !== expectedContinuityCounter) {
-      this.logger.warn(
-        `MPEG-TS Continuity Counter check failed for PID='${pid}', CC=${continuityCounter}, Expected-CC=${expectedContinuityCounter} Last-CC=${lastContinuityCounter}`,
-      );
+      const msg = `MPEG-TS Continuity Counter check failed for PID='${pid}', CC=${continuityCounter}, Expected-CC=${expectedContinuityCounter} Last-CC=${lastContinuityCounter}`;
+      this.logger.warn(msg);
+      warnProgressiveTsDiag(this.config, msg);
       this.integrityState = 'cc-failed';
       return;
     }
 
     if ((data[1] & 0x80) !== 0) {
-      this.logger.warn(`MPEG-TS Packet had TEI flag set for PID='${pid}'`);
+      const msg = `MPEG-TS Packet had TEI flag set for PID='${pid}'`;
+      this.logger.warn(msg);
+      warnProgressiveTsDiag(this.config, msg);
       this.integrityState = 'tei-bit';
       return;
     }

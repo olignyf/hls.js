@@ -1,5 +1,6 @@
 import BufferOperationQueue from './buffer-operation-queue';
 import { createDoNothingErrorAction } from './error-controller';
+import { warnProgressiveTsDiag } from './progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import { ElementaryStreamTypes, isMediaFragment } from '../loader/fragment';
@@ -1775,8 +1776,12 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
   private _onMediaError = () => {
     const { media } = this;
     if (media) {
-      this.log(
-        `Media error (code: ${media.error?.code}): ${media.error?.message}`,
+      const code = media.error?.code;
+      const message = media.error?.message;
+      this.log(`Media error (code: ${code}): ${message}`);
+      warnProgressiveTsDiag(
+        this.hls.config,
+        `media decode error (code ${code}): ${message ?? 'unknown'}`,
       );
     }
   };
@@ -1813,6 +1818,10 @@ transfer tracks: ${stringify(transferredTracks, (key, value) => (key === 'initSe
       `${type} SourceBuffer error. MediaSource readyState: ${readyState}`,
     );
     this.error(`${error.message}`, event);
+    warnProgressiveTsDiag(
+      this.hls.config,
+      `SourceBuffer decode/append error (${type}): ${error.message}`,
+    );
     // according to http://www.w3.org/TR/media-source/#sourcebuffer-append-error
     // SourceBuffer errors are not necessarily fatal; if so, the HTMLMediaElement will fire an error event
     this.hls.trigger(Events.ERROR, {

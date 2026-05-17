@@ -1,5 +1,6 @@
 import AAC from './aac-helper';
 import MP4 from './mp4-generator';
+import { warnProgressiveTsDiag } from '../controller/progressive-ts-scheduler';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import { PlaylistLevelType } from '../types/loader';
@@ -230,9 +231,9 @@ export default class MP4Remuxer extends Logger implements Remuxer {
         if (!isVideoContiguous && this.config.forceKeyFrameOnDiscontinuity) {
           independent = true;
           if (firstKeyFrameIndex > 0) {
-            this.warn(
-              `Dropped ${firstKeyFrameIndex} out of ${length} video samples due to a missing keyframe`,
-            );
+            const droppedMsg = `Dropped ${firstKeyFrameIndex} out of ${length} video samples due to a missing keyframe`;
+            this.warn(droppedMsg);
+            warnProgressiveTsDiag(this.config, droppedMsg);
             const startPTS = this.getVideoStartPts(videoTrack.samples);
             videoTrack.samples = videoTrack.samples.slice(firstKeyFrameIndex);
             videoTrack.dropped += firstKeyFrameIndex;
@@ -241,7 +242,9 @@ export default class MP4Remuxer extends Logger implements Remuxer {
               videoTrack.inputTimeScale;
             firstKeyFramePTS = videoTimeOffset;
           } else if (firstKeyFrameIndex === -1) {
-            this.warn(`No keyframe found out of ${length} video samples`);
+            const noKfMsg = `No keyframe found out of ${length} video samples`;
+            this.warn(noKfMsg);
+            warnProgressiveTsDiag(this.config, noKfMsg);
             independent = false;
           }
         }
